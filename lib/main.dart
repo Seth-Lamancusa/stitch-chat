@@ -5,11 +5,15 @@ import 'package:provider/provider.dart';
 
 import 'core/notifications/notification_overlay.dart';
 import 'core/notifications/notification_service.dart';
-import 'data/repositories/chat_repository_impl.dart';
+import 'data/repositories/drift_column_repository.dart';
+import 'data/repositories/drift_message_repository.dart';
+import 'data/services/app_database.dart';
+import 'data/services/dev_seed.dart';
+import 'data/services/local_identity_service.dart';
 import 'data/services/python_process_service.dart';
-import 'data/services/stitch_ws_client.dart';
-import 'ui/chat/chat_view.dart';
-import 'ui/chat/chat_viewmodel.dart';
+import 'domain/branch_path_service.dart';
+import 'ui/columns/columns_view.dart';
+import 'ui/columns/columns_viewmodel.dart';
 
 final _pythonProcess = PythonProcessService();
 
@@ -22,19 +26,29 @@ void main() async {
   });
 
   await _pythonProcess.start();
-  final wsClient = StitchWsClient(Uri.parse('ws://127.0.0.1:8765'));
-  final repository = ChatRepositoryImpl(wsClient);
-  final notificationService = NotificationService();
-  final viewModel = ChatViewModel(repository, notificationService);
-  await viewModel.initialize();
 
-  runApp(StitchApp(viewModel: viewModel, notificationService: notificationService));
+  final identityService = LocalIdentityService();
+  await identityService.initialize();
+
+  final db = AppDatabase();
+  final messageRepository = DriftMessageRepository(db);
+  final columnRepository = DriftColumnRepository(db);
+  final branchPathService = BranchPathService(messageRepository, columnRepository);
+
+  await seedDevDataIfEmpty(messageRepository, columnRepository);
+
+  final columnsViewModel = ColumnsViewModel(messageRepository, columnRepository, branchPathService, identityService);
+  await columnsViewModel.initialize();
+
+  final notificationService = NotificationService();
+
+  runApp(StitchApp(columnsViewModel: columnsViewModel, notificationService: notificationService));
 }
 
 class StitchApp extends StatefulWidget {
-  final ChatViewModel viewModel;
+  final ColumnsViewModel columnsViewModel;
   final NotificationService notificationService;
-  const StitchApp({super.key, required this.viewModel, required this.notificationService});
+  const StitchApp({super.key, required this.columnsViewModel, required this.notificationService});
 
   @override
   State<StitchApp> createState() => _StitchAppState();
@@ -65,12 +79,18 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<NotificationService>.value(value: widget.notificationService),
-        ChangeNotifierProvider<ChatViewModel>.value(value: widget.viewModel),
+        ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
       ],
       child: MaterialApp(
         title: 'Stitch Desktop',
-        theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple)),
-        home: const NotificationOverlay(child: ChatView()),
+        theme: ThemeData(
+          brightness: Brightness.dark,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.deepPurple,
+            brightness: Brightness.dark,
+          ),
+        ),
+        home: const NotificationOverlay(child: ColumnsView()),
       ),
     );
   }

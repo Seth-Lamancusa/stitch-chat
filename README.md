@@ -1,8 +1,10 @@
 ## Stitch Desktop
 
-Stitch Desktop is a desktop app for interacting with coding agents and traditional chatbots. Integrations will include OpenAI-compatible model servers like those of OpenAI, Anthropic, and OpenRouter, local models served using Ollama or comparable local harnesses, as well as coding agent SDKs that include built-in prompting and orchestration like Cursor, Claude Code, Codex, and Antigravity. We interface with these servers and runtimes alike via a local proxy server that normalizes their various formats and response mechanisms to a universal contractual interface. We believe in the bringing together the simplicity and local necessity of terminal applications for chat-based agent runtime interaction, traditional, external code-editing workflows, and the generality of local or cloud-based language models with function-calling for integration with external services, high-level reasoning, or web search.
+> Status note: much of the functionality described below remains unimplemented.
 
-The app is also set to include an integration with the Stitch "cloud" backend. You can talk to local models, coding agents, or other cloud model response providers without authenticating with your Stitch account, but authenticating buys you message sync with the web app and its feature set for free.
+Stitch Desktop is a desktop app for interacting with coding agents, chatbots, and human users. Integrations include OpenAI-compatible model servers like those of OpenAI, Anthropic, and OpenRouter, local models hosted via Ollama or comparable runtime servers, as well as coding agent SDKs that include built-in prompting and orchestration like Cursor, Claude Code, Codex, and Antigravity. We interface with these servers and runtimes alike via a local proxy server that normalizes their various formats and response mechanisms to a universal contractual interface. We believe in bringing together the local necessity and utility of coding agent runtimes, local or cloud-based language models with function-calling for integration with external services, high-level planning, or web search, and collaboration with human beings in one interface.
+
+The app is also set up to include an integration with the Stitch cloud backend. You can talk to local models, coding agents, or other cloud model response providers without authenticating with your Stitch account, but authenticating buys you human messaging and message sync with the web app.
 
 Run with `flutter run` to develop.
 
@@ -27,7 +29,7 @@ flutter-project-root/
 
 #### Data Model
 
-Stitch utilizes a general data model for tracking conversations, messages, and function invocations. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and allow connection between them. The fundamental data model is that of the message. Abstractly:
+Stitch utilizes a general data model for tracking conversations, messages, and function invocations. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and support connections between them. The fundamental data model is that of the message. Abstractly:
 
 ```
 class Message:
@@ -35,10 +37,10 @@ class Message:
     role: str FK                 # Function call, response, author ID
     parent-message-id: str       # Connects messages together
     git-commit: opt str
-    ...
+    etc
 ```
 
-This enables iteration on prompts and context windows, as well as version control for comparing results between coding runtimes. Each set of messages simply connected by reply ancestry / descendence is a conversation tree with a single root message.
+This enables iteration on prompts and context windows (via thread branching or forking - replying multiple times to the same message in the same context), as well as version control for comparing results between coding runtimes. Each set of messages simply connected by reply ancestry / descendence is a conversation tree with a single root message, and a linear subset of a conversation tree acts as the rendered thread and context object.
 
 #### Python Runtime Registry
 
@@ -50,7 +52,7 @@ There are two runtime regimes:
 * **API regime** — fewer handlers than bots, shared by contract shape rather than by provider:
   e.g. `OpenAICompatibleHandler(base_url, model)` — covers OpenRouter (cloud) and Ollama (local), and any future provider speaking OpenAI's chat/completions schema. One class, many bots via different `params`.
 
-In the future, this can be extended to support direct subprocess invocation for any tool that doesn't expose an API or an SDK, or to any other kind of abstract runtime.
+This paradigm also supports direct subprocess invocation for any tool that doesn't expose an API or an SDK, or to any other kind of abstract runtime.
 
 Separation: A `RuntimeRegistry` maps `bot_id -> (handler class, params)`. Handlers assume their `base_url` is already live and only do request/response — they don't manage process lifecycle. Local API runtimes (OpenCode, Ollama) need a local server process running before a handler can talk to them. A `LocalServerManager` checks whether a runtime depends to a local server and whether it's already up, spawns it if not, health-checks it, and tears it down on app exit. Handlers for local runtimes depend on this but don't own it, and return regular HTTP status codes.
 
@@ -63,10 +65,26 @@ We use a WebSocket connection between the Dart client and the Python server to e
 * One connection multiplexes every bot and every open conversation — there's no per-bot or per-conversation socket. Every payload carries enough addressing (`bot_id`, `parent_message_id`) for either side to route it.
 
 Each response runtime is expected to provide the following:
-* One or more responses - rendered and ingested on Dart side as list of consecutive messages by the same author with previous parent IDs
-* Function invocations and responses - Dart treats as messages with unique roles
+* One or more responses - rendered and ingested on Dart side as list of consecutive messages by the same author with previous (chained) parent IDs
 * A way to specify what model / version to use
+* A way to track spend (or at least, token utility and pricing for manual calculation)
+And optionally:
 * A way to specify the cwd
+* Means of function invocation and response - Dart treats as messages with unique roles
+* MCP interface support
+
+
+### Cloud-based Interaction
+
+The proxy server handles responses instantaneously (arbitrarily finite response time, returned in-process). Human user responses are not necessarily instantaneous, and of course are not generated by a local runtime (conceptually this may be true for model responses too). Bots registered with our local runtime are tagged in the UI as "local users". A user may authenticate with the Stitch cloud for message sync, private message access, and posting messages to other users.
+
+**Before authenticating**
+
+Before authenticating with the Stitch cloud, a user can interact with local models configured as runtimes, and also access public cloud messages by cloud users.
+
+**After authenticating**
+
+After authenticating, a user can access their private message via the Stitch desktop app, post messages to other cloud users, and sync their messages (including interactions with local bots) with the Stitch cloud backend.
 
 
 ### Notes
@@ -89,6 +107,7 @@ All user-facing errors route through a single `NotificationService` (`lib/core/n
 ## Tips
 
 * Prefer creating new files for new logic, classes, and so on over appending to existing files.
+* For detailed documentation, see the `./docs` directory.
 
 
 
@@ -99,5 +118,3 @@ All user-facing errors route through a single `NotificationService` (`lib/core/n
 - [Cursor SDK](https://cursor.com/docs/sdk/python)
 - [Claude Code SDK](https://code.claude.com/docs/en/agent-sdk/overview)
 - [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
-
-# stitch-desktop

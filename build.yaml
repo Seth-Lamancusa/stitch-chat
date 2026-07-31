@@ -1,0 +1,11 @@
+targets:
+  $default:
+    builders:
+      drift_dev:
+        options:
+          # Store DateTime columns as ISO-8601 text (preserving UTC-ness)
+          # instead of unix-timestamp integers, which silently convert back
+          # to local time on read. Matters for `Message.createdAt`: the app
+          # plans a future cloud sync path across devices/timezones, so
+          # timestamps need to be unambiguous.
+          store_date_time_values_as_text: true
