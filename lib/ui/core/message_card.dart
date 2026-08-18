@@ -62,7 +62,7 @@ class _MessageBubble extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(6),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: background,
         borderRadius: BorderRadius.circular(14),
