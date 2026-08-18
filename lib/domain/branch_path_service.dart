@@ -7,28 +7,7 @@ import '../data/repositories/message_repository.dart';
 /// is computed by walking out from an anchor message — up via reply
 /// ancestry, down via each column's persisted branch pointers — not stored
 /// as its own list anywhere.
-///
-/// Adapted from stitch-flutter's `ChatLayoutViewModel` (`_prepareBranchPath`/
-/// `_findLatestDescendant`/`_getFullVisibleBranch`), simplified from a
-/// whole-subtree "find the single globally-latest message, then backtrack"
-/// pass into a greedy per-fork pick (most-recent immediate child at each
-/// unset fork, persisted immediately). The two produce the same result for
-/// a purely linear history — the common case — and the greedy form composes
-/// naturally with per-column persistence across app restarts, which
-/// stitch-flutter never had (it recomputed the whole path from scratch on
-/// every load).
-///
-/// Upward traversal consults `ColumnRepository`'s visible-incoming pointer
-/// first, falling back to the structural reply parent only when nothing has
-/// been recorded for this column yet — mirroring the downward direction's
-/// "persisted pointer, else default" shape. This matters once a column's
-/// path has crossed a stitch edge: the child on the far side of that edge
-/// has no reply ancestry of its own, so re-deriving the branch purely from
-/// reply structure would silently drop everything above the stitch hop.
-/// The fallback has no fork to resolve yet (a message has exactly one reply
-/// parent today) and so doesn't persist anything, unlike the downward
-/// default — once multi-parent replies exist, that fallback needs to start
-/// persisting too, symmetric with downward defaulting.
+
 class BranchPathService {
   BranchPathService(this._messages, this._columns);
 

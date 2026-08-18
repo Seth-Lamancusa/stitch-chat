@@ -31,7 +31,7 @@ class ColumnsViewModel extends ChangeNotifier {
   static const _uuid = Uuid();
 
   final List<ColumnUiState> _states = [];
-  final Map<String, String> _anchors = {};
+  final Map<String, String?> _anchors = {};
 
   List<ColumnUiState> get columns => List.unmodifiable(_states);
 
@@ -54,7 +54,7 @@ class ColumnsViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addColumn({required String anchorMessageId, double? width}) async {
+  Future<void> addColumn({String? anchorMessageId, double? width}) async {
     final meta = await _columns.createColumn(anchorMessageId: anchorMessageId, width: width);
     _anchors[meta.id] = meta.anchorMessageId;
     for (final state in _states) {

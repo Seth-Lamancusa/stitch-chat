@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/message.dart';
+import 'migrations.dart';
 
 part 'app_database.g.dart';
 
@@ -71,7 +72,9 @@ class RecipientEdges extends Table {
 @DataClassName('ColumnRow')
 class Columns extends Table {
   TextColumn get id => text()();
-  TextColumn get anchorMessageId => text().references(Messages, #id)();
+  // Nullable: a freshly-added column with no messages yet has no anchor
+  // until the first message is sent into it.
+  TextColumn get anchorMessageId => text().references(Messages, #id).nullable()();
   RealColumn get width => real().nullable()(); // null = flexible
 
   @override
@@ -116,11 +119,12 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) => runMigrations(m, this, from, to),
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON');
         },

@@ -48,7 +48,7 @@ class _ColumnViewState extends State<ColumnView> {
           color: state.isActive ? Colors.white.withValues(alpha: 0.02) : null,
           border: Border(
             left: BorderSide(
-              color: state.isActive ? Theme.of(context).colorScheme.primary : Colors.transparent,
+              color: state.isActive ? Colors.green : Colors.transparent,
               width: 4,
             ),
           ),

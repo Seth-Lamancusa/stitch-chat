@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'stitch_colors.dart';
-
 /// Ported from stitch-frontend's `SiblingNavigator.vue`. Cycles the pool of
 /// candidates the *parent above this message* could show in this slot —
 /// i.e. this message's siblings. Matching the Vue source (mounted on the
@@ -87,6 +85,7 @@ class OutgoingNavigator extends StatelessWidget {
 
 class OutgoingNavArrow extends StatefulWidget {
   const OutgoingNavArrow({
+    super.key,
     required this.icon,
     required this.enabled,
     required this.loading,

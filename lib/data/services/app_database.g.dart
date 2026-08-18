@@ -1278,9 +1278,9 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
   late final GeneratedColumn<String> anchorMessageId = GeneratedColumn<String>(
     'anchor_message_id',
     aliasedName,
-    false,
+    true,
     type: DriftSqlType.string,
-    requiredDuringInsert: true,
+    requiredDuringInsert: false,
     defaultConstraints: GeneratedColumn.constraintIsAlways(
       'REFERENCES messages (id)',
     ),
@@ -1321,8 +1321,6 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
           _anchorMessageIdMeta,
         ),
       );
-    } else if (isInserting) {
-      context.missing(_anchorMessageIdMeta);
     }
     if (data.containsKey('width')) {
       context.handle(
@@ -1346,7 +1344,7 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
       anchorMessageId: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}anchor_message_id'],
-      )!,
+      ),
       width: attachedDatabase.typeMapping.read(
         DriftSqlType.double,
         data['${effectivePrefix}width'],
@@ -1362,18 +1360,16 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
 
 class ColumnRow extends DataClass implements Insertable<ColumnRow> {
   final String id;
-  final String anchorMessageId;
+  final String? anchorMessageId;
   final double? width;
-  const ColumnRow({
-    required this.id,
-    required this.anchorMessageId,
-    this.width,
-  });
+  const ColumnRow({required this.id, this.anchorMessageId, this.width});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['id'] = Variable<String>(id);
-    map['anchor_message_id'] = Variable<String>(anchorMessageId);
+    if (!nullToAbsent || anchorMessageId != null) {
+      map['anchor_message_id'] = Variable<String>(anchorMessageId);
+    }
     if (!nullToAbsent || width != null) {
       map['width'] = Variable<double>(width);
     }
@@ -1383,7 +1379,9 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
   ColumnsCompanion toCompanion(bool nullToAbsent) {
     return ColumnsCompanion(
       id: Value(id),
-      anchorMessageId: Value(anchorMessageId),
+      anchorMessageId: anchorMessageId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(anchorMessageId),
       width: width == null && nullToAbsent
           ? const Value.absent()
           : Value(width),
@@ -1397,7 +1395,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return ColumnRow(
       id: serializer.fromJson<String>(json['id']),
-      anchorMessageId: serializer.fromJson<String>(json['anchorMessageId']),
+      anchorMessageId: serializer.fromJson<String?>(json['anchorMessageId']),
       width: serializer.fromJson<double?>(json['width']),
     );
   }
@@ -1406,18 +1404,20 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
       'id': serializer.toJson<String>(id),
-      'anchorMessageId': serializer.toJson<String>(anchorMessageId),
+      'anchorMessageId': serializer.toJson<String?>(anchorMessageId),
       'width': serializer.toJson<double?>(width),
     };
   }
 
   ColumnRow copyWith({
     String? id,
-    String? anchorMessageId,
+    Value<String?> anchorMessageId = const Value.absent(),
     Value<double?> width = const Value.absent(),
   }) => ColumnRow(
     id: id ?? this.id,
-    anchorMessageId: anchorMessageId ?? this.anchorMessageId,
+    anchorMessageId: anchorMessageId.present
+        ? anchorMessageId.value
+        : this.anchorMessageId,
     width: width.present ? width.value : this.width,
   );
   ColumnRow copyWithCompanion(ColumnsCompanion data) {
@@ -1453,7 +1453,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
 
 class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
   final Value<String> id;
-  final Value<String> anchorMessageId;
+  final Value<String?> anchorMessageId;
   final Value<double?> width;
   final Value<int> rowid;
   const ColumnsCompanion({
@@ -1464,11 +1464,10 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
   });
   ColumnsCompanion.insert({
     required String id,
-    required String anchorMessageId,
+    this.anchorMessageId = const Value.absent(),
     this.width = const Value.absent(),
     this.rowid = const Value.absent(),
-  }) : id = Value(id),
-       anchorMessageId = Value(anchorMessageId);
+  }) : id = Value(id);
   static Insertable<ColumnRow> custom({
     Expression<String>? id,
     Expression<String>? anchorMessageId,
@@ -1485,7 +1484,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
 
   ColumnsCompanion copyWith({
     Value<String>? id,
-    Value<String>? anchorMessageId,
+    Value<String?>? anchorMessageId,
     Value<double?>? width,
     Value<int>? rowid,
   }) {
@@ -3918,14 +3917,14 @@ typedef $$RecipientEdgesTableProcessedTableManager =
 typedef $$ColumnsTableCreateCompanionBuilder =
     ColumnsCompanion Function({
       required String id,
-      required String anchorMessageId,
+      Value<String?> anchorMessageId,
       Value<double?> width,
       Value<int> rowid,
     });
 typedef $$ColumnsTableUpdateCompanionBuilder =
     ColumnsCompanion Function({
       Value<String> id,
-      Value<String> anchorMessageId,
+      Value<String?> anchorMessageId,
       Value<double?> width,
       Value<int> rowid,
     });
@@ -3937,9 +3936,9 @@ final class $$ColumnsTableReferences
   static $MessagesTable _anchorMessageIdTable(_$AppDatabase db) =>
       db.messages.createAlias('columns__anchor_message_id__messages__id');
 
-  $$MessagesTableProcessedTableManager get anchorMessageId {
-    final $_column = $_itemColumn<String>('anchor_message_id')!;
-
+  $$MessagesTableProcessedTableManager? get anchorMessageId {
+    final $_column = $_itemColumn<String>('anchor_message_id');
+    if ($_column == null) return null;
     final manager = $$MessagesTableTableManager(
       $_db,
       $_db.messages,
@@ -4185,7 +4184,7 @@ class $$ColumnsTableTableManager
           updateCompanionCallback:
               ({
                 Value<String> id = const Value.absent(),
-                Value<String> anchorMessageId = const Value.absent(),
+                Value<String?> anchorMessageId = const Value.absent(),
                 Value<double?> width = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ColumnsCompanion(
@@ -4197,7 +4196,7 @@ class $$ColumnsTableTableManager
           createCompanionCallback:
               ({
                 required String id,
-                required String anchorMessageId,
+                Value<String?> anchorMessageId = const Value.absent(),
                 Value<double?> width = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ColumnsCompanion.insert(

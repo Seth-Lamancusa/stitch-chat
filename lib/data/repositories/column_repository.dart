@@ -4,7 +4,7 @@
 /// only stores whatever decision was made.
 class ColumnMeta {
   final String id;
-  final String anchorMessageId;
+  final String? anchorMessageId; // null = no messages sent into this column yet
   final double? width; // null = flexible
 
   const ColumnMeta({
@@ -20,7 +20,7 @@ class ColumnMeta {
 /// currently derives from above it. Both directions of the same underlying
 /// (parentId, childId) pointer pair, read from opposite ends.
 abstract class ColumnRepository {
-  Future<ColumnMeta> createColumn({required String anchorMessageId, double? width});
+  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width});
 
   Future<void> deleteColumn(String id);
 

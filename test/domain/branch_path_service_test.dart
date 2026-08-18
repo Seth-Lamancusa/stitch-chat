@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:stitch_desktop/data/models/message.dart';
-import 'package:stitch_desktop/data/repositories/column_repository.dart';
-import 'package:stitch_desktop/data/repositories/message_repository.dart';
-import 'package:stitch_desktop/domain/branch_path_service.dart';
+import 'package:stitch_chat/data/models/message.dart';
+import 'package:stitch_chat/data/repositories/column_repository.dart';
+import 'package:stitch_chat/data/repositories/message_repository.dart';
+import 'package:stitch_chat/domain/branch_path_service.dart';
 
 class FakeMessageRepository implements MessageRepository {
   final Map<String, Message> _messages = {};
@@ -83,7 +83,7 @@ class FakeColumnRepository implements ColumnRepository {
   final Map<String, Map<String, String>> _visibleIncoming = {};
 
   @override
-  Future<ColumnMeta> createColumn({required String anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
     final id = 'col-${_columns.length}';
     final meta = ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
     _columns[id] = meta;

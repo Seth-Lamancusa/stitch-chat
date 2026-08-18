@@ -11,12 +11,12 @@ class DriftColumnRepository implements ColumnRepository {
   static const _uuid = Uuid();
 
   @override
-  Future<ColumnMeta> createColumn({required String anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
     final id = _uuid.v4();
     await _db.into(_db.columns).insert(
           ColumnsCompanion.insert(
             id: id,
-            anchorMessageId: anchorMessageId,
+            anchorMessageId: Value(anchorMessageId),
             width: Value(width),
           ),
         );
