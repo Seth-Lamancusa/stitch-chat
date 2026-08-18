@@ -1,8 +1,8 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:stitch_desktop/data/models/message.dart';
-import 'package:stitch_desktop/data/repositories/drift_message_repository.dart';
-import 'package:stitch_desktop/data/services/app_database.dart';
+import 'package:stitch_chat/data/models/message.dart';
+import 'package:stitch_chat/data/repositories/drift_message_repository.dart';
+import 'package:stitch_chat/data/services/app_database.dart';
 
 void main() {
   late AppDatabase db;

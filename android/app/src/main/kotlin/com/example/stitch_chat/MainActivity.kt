@@ -1,4 +1,4 @@
-package com.example.stitch_desktop
+package com.example.stitch_chat
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -8,7 +9,6 @@ import 'core/notifications/notification_service.dart';
 import 'data/repositories/drift_column_repository.dart';
 import 'data/repositories/drift_message_repository.dart';
 import 'data/services/app_database.dart';
-import 'data/services/dev_seed.dart';
 import 'data/services/local_identity_service.dart';
 import 'data/services/python_process_service.dart';
 import 'domain/branch_path_service.dart';
@@ -20,10 +20,16 @@ final _pythonProcess = PythonProcessService();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  ProcessSignal.sigint.watch().listen((_) {
+  void handleTerminationSignal(_) {
     _pythonProcess.stop();
     exit(0);
-  });
+  }
+
+  ProcessSignal.sigint.watch().listen(handleTerminationSignal);
+  if (!Platform.isWindows) {
+    // SIGTERM isn't supported by ProcessSignal.watch on Windows.
+    ProcessSignal.sigterm.watch().listen(handleTerminationSignal);
+  }
 
   await _pythonProcess.start();
 
@@ -34,8 +40,6 @@ void main() async {
   final messageRepository = DriftMessageRepository(db);
   final columnRepository = DriftColumnRepository(db);
   final branchPathService = BranchPathService(messageRepository, columnRepository);
-
-  await seedDevDataIfEmpty(messageRepository, columnRepository);
 
   final columnsViewModel = ColumnsViewModel(messageRepository, columnRepository, branchPathService, identityService);
   await columnsViewModel.initialize();
@@ -55,15 +59,28 @@ class StitchApp extends StatefulWidget {
 }
 
 class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
+  late final AppLifecycleListener _lifecycleListener;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // On desktop, this fires when the window close button is pressed, before
+    // the app actually exits — a more reliable signal than
+    // didChangeAppLifecycleState(detached), which some window managers never
+    // deliver on close.
+    _lifecycleListener = AppLifecycleListener(
+      onExitRequested: () async {
+        _pythonProcess.stop();
+        return AppExitResponse.exit;
+      },
+    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _lifecycleListener.dispose();
     super.dispose();
   }
 
@@ -82,7 +99,7 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
         ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
       ],
       child: MaterialApp(
-        title: 'Stitch Desktop',
+        title: 'Stitch Chat',
         theme: ThemeData(
           brightness: Brightness.dark,
           colorScheme: ColorScheme.fromSeed(

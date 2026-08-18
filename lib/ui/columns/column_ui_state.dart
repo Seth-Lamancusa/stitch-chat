@@ -1,5 +1,5 @@
+import '../../data/models/edges.dart';
 import '../../data/models/message.dart';
-import '../../data/repositories/message_repository.dart';
 import '../core/adaptive_marker.dart';
 
 /// Everything a single row in a column's message list needs to render its

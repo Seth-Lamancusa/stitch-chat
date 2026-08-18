@@ -22,18 +22,8 @@ class ColumnsView extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.add),
             tooltip: 'Add column',
-            onPressed: vm.columns.isEmpty
-                ? null
-                : () {
-                    final active = vm.columns.firstWhere(
-                      (c) => c.isActive,
-                      orElse: () => vm.columns.first,
-                    );
-                    final anchor = vm.anchorOf(active.id);
-                    if (anchor != null) {
-                      vm.addColumn(anchorMessageId: anchor);
-                    }
-                  },
+            mouseCursor: SystemMouseCursors.click,
+            onPressed: () => vm.addColumn(),
           ),
           const SizedBox(width: 8),
         ],

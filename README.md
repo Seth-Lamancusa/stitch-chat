@@ -1,10 +1,10 @@
-## Stitch Desktop
+## Stitch Chat
 
 > Status note: much of the functionality described below remains unimplemented.
 
-Stitch Desktop is a desktop app for interacting with coding agents, chatbots, and human users. Integrations include OpenAI-compatible model servers like those of OpenAI, Anthropic, and OpenRouter, local models hosted via Ollama or comparable runtime servers, as well as coding agent SDKs that include built-in prompting and orchestration like Cursor, Claude Code, Codex, and Antigravity. We interface with these servers and runtimes alike via a local proxy server that normalizes their various formats and response mechanisms to a universal contractual interface. We believe in bringing together the local necessity and utility of coding agent runtimes, local or cloud-based language models with function-calling for integration with external services, high-level planning, or web search, and collaboration with human beings in one interface.
+Stitch Chat is a desktop app for interacting with coding agents, chatbots, and human users. Integrations include OpenAI-compatible model servers (OpenAI, Anthropic, OpenRouter, etc) local model runtime servers (Ollama, LM Studio, etc), and coding agent runtimes that include built-in prompting and orchestration (Cursor, Claude Code, Codex, Antigravity). We interface with these servers and runtimes alike via a local proxy that normalizes their various formats and response mechanisms to a universal interface. Stitch aims to bring together local model or agent runtimes, cloud-based providers, and collaboration with human beings.
 
-The app is also set up to include an integration with the Stitch cloud backend. You can talk to local models, coding agents, or other cloud model response providers without authenticating with your Stitch account, but authenticating buys you human messaging and message sync with the web app.
+The app integrates with the Stitch cloud backend, which powers human messaging. You can talk to local models, coding agents, or cloud model response providers (via the local proxy) without authenticating with your Stitch account, but authenticating buys you human messaging and message sync with the web app.
 
 Run with `flutter run` to develop.
 
@@ -44,15 +44,13 @@ This enables iteration on prompts and context windows (via thread branching or f
 
 #### Python Runtime Registry
 
-Bots are dispatched by runtime, not hardcoded per bot. Each bot is a `BotConfig {bot_id, runtime, params}` — `runtime` selects a handler class, `params` differentiate individual bots that share the same handler (e.g. base_url, model name, api_key).
-
-There are two runtime regimes:
+Bot requests are dispatched by runtime, not hardcoded per bot. Each bot is a `BotConfig {bot_id, runtime, params}` — `runtime` selects a handler class, `params` differentiate individual bots that share the same handler (e.g. base_url, model name, api_key). There are two runtime regimes:
 
 * **SDK regime** — one handler per SDK, since each has its own session/invocation model: `ClaudeCodeHandler`, `CursorHandler`, `AntigravityHandler`. No sharing across these beyond the common `handle(message) -> response` interface.
 * **API regime** — fewer handlers than bots, shared by contract shape rather than by provider:
   e.g. `OpenAICompatibleHandler(base_url, model)` — covers OpenRouter (cloud) and Ollama (local), and any future provider speaking OpenAI's chat/completions schema. One class, many bots via different `params`.
 
-This paradigm also supports direct subprocess invocation for any tool that doesn't expose an API or an SDK, or to any other kind of abstract runtime.
+This paradigm also supports direct subprocess invocation for any tool that doesn't expose an API or an SDK, or any other kind of runtime abstraction.
 
 Separation: A `RuntimeRegistry` maps `bot_id -> (handler class, params)`. Handlers assume their `base_url` is already live and only do request/response — they don't manage process lifecycle. Local API runtimes (OpenCode, Ollama) need a local server process running before a handler can talk to them. A `LocalServerManager` checks whether a runtime depends to a local server and whether it's already up, spawns it if not, health-checks it, and tears it down on app exit. Handlers for local runtimes depend on this but don't own it, and return regular HTTP status codes.
 
@@ -64,27 +62,31 @@ We use a WebSocket connection between the Dart client and the Python server to e
 * Flutter launches the bundled Python server as a local subprocess on app start (see `build_dist.sh`/PyInstaller layout above) and opens one persistent WS connection to it.
 * One connection multiplexes every bot and every open conversation — there's no per-bot or per-conversation socket. Every payload carries enough addressing (`bot_id`, `parent_message_id`) for either side to route it.
 
-Each response runtime is expected to provide the following:
-* One or more responses - rendered and ingested on Dart side as list of consecutive messages by the same author with previous (chained) parent IDs
-* A way to specify what model / version to use
-* A way to track spend (or at least, token utility and pricing for manual calculation)
-And optionally:
+Each response runtime is expected to provide the following input options:
+* A way to specify what model and version to use (Dart sends bot id and canonical version, bridge maps to runtime and bespoke model / version combination), e.g.
+   - "@claude-code:sonnet-5.6 ..." --> claude code runtime + model
+   - "@cursor:gpt-sol-5.6" --> cursor runtime + model
+   - "@chatgpt:gpt-sol-5.6" --> OpenAI runtime, OpenAI endpoint + model^
 * A way to specify the cwd
-* Means of function invocation and response - Dart treats as messages with unique roles
-* MCP interface support
+
+And output fields:
+* One or more responses (optionally over time) - rendered and ingested on Dart side as list of consecutive messages by the same author with previous (chained) parent IDs
+* Token usage by in / out and pricing (for cost calculation)
+
+What about MCP capabilities and function calling?
+
+^ ChatGPT could be invoked via OpenAI, OpenRouter, or coding orchestration harnesses. Typically, one popular model will have a canonical user ID that maps to a simple response endpoint (be it OpenRouter or provider-hosted), and agentic coding harnesses are invoked as their own bots users (with version deciding the model). Note that the model / version paradigm is flexible, and it's also possible to configure multiple versions of chatgpt for each endpoint: e.g. "@chatgpt:openrouter" vs "@chatgpt:openai". Thinking effort can also be folded into model verisons as e.g. "@claude-code:sonnet-5.6-high" for high effort. This generally goes for any SDK options. Stitch has canonical users with IDs and possibly mutliple versions, the backend registers these as cloud users, and the Flutter app in this repo registers them locally and associates them with a runtime and parameterization.
 
 
 ### Cloud-based Interaction
 
 The proxy server handles responses instantaneously (arbitrarily finite response time, returned in-process). Human user responses are not necessarily instantaneous, and of course are not generated by a local runtime (conceptually this may be true for model responses too). Bots registered with our local runtime are tagged in the UI as "local users". A user may authenticate with the Stitch cloud for message sync, private message access, and posting messages to other users.
 
-**Before authenticating**
+**Before authenticating** - Before authenticating with the Stitch cloud, a user can interact with local models configured as runtimes, and also access public cloud messages by cloud users.
 
-Before authenticating with the Stitch cloud, a user can interact with local models configured as runtimes, and also access public cloud messages by cloud users.
+**After authenticating** - After authenticating, a user can access their private messages via the Stitch Chat app, post messages to other cloud users, and sync their messages (including interactions with local bots) with the Stitch cloud backend.
 
-**After authenticating**
-
-After authenticating, a user can access their private message via the Stitch desktop app, post messages to other cloud users, and sync their messages (including interactions with local bots) with the Stitch cloud backend.
+A small laptop emoji chip beside user tags in message tags or author labels distinguish cloud from local users.
 
 
 ### Notes
@@ -108,6 +110,7 @@ All user-facing errors route through a single `NotificationService` (`lib/core/n
 
 * Prefer creating new files for new logic, classes, and so on over appending to existing files.
 * For detailed documentation, see the `./docs` directory.
+* Make the mouse cursor shape responsive to button hovers (e.g. `SystemMouseCursors.click`) in general, not just on a case-by-case basis.
 
 
 

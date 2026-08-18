@@ -1,6 +1,6 @@
 {
-    "name": "stitch_desktop",
-    "short_name": "stitch_desktop",
+    "name": "stitch_chat",
+    "short_name": "stitch_chat",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

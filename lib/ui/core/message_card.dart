@@ -26,18 +26,6 @@ class MessageCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return _MessageBubble(message: message, currentUserId: currentUserId);
   }
-
-  static String _defaultAuthorLabel(MessageRole role) {
-    switch (role) {
-      case MessageRole.user:
-        return 'user';
-      case MessageRole.localBot:
-        return 'assistant';
-      case MessageRole.functionCall:
-      case MessageRole.functionResult:
-        return 'function';
-    }
-  }
 }
 
 class _MessageBubble extends StatelessWidget {
