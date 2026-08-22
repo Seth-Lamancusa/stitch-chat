@@ -1,6 +1,6 @@
 ## Stitch Chat
 
-> Status note: much of the functionality described below remains unimplemented.
+> Status note: normative, unimplemented
 
 Stitch Chat is a desktop app for interacting with coding agents, chatbots, and human users. Integrations include OpenAI-compatible model servers (OpenAI, Anthropic, OpenRouter, etc) local model runtime servers (Ollama, LM Studio, etc), and coding agent runtimes that include built-in prompting and orchestration (Cursor, Claude Code, Codex, Antigravity). We interface with these servers and runtimes alike via a local proxy that normalizes their various formats and response mechanisms to a universal interface. Stitch aims to bring together local model or agent runtimes, cloud-based providers, and collaboration with human beings.
 
