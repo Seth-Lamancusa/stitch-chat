@@ -45,7 +45,7 @@ class ColumnsViewModel extends ChangeNotifier {
     final metas = await _columns.getColumns();
     for (final meta in metas) {
       _anchors[meta.id] = meta.anchorMessageId;
-      _states.add(ColumnUiState(id: meta.id, width: meta.width));
+      _states.add(ColumnUiState(id: meta.id, width: meta.width, initialScrollOffset: meta.scrollOffset));
     }
     if (_states.isNotEmpty) _states.first.isActive = true;
     for (final state in _states) {
@@ -88,6 +88,16 @@ class ColumnsViewModel extends ChangeNotifier {
     await _columns.updateColumnWidth(id, width);
     _stateFor(id).width = width;
     notifyListeners();
+  }
+
+  /// Straight-through, non-notifying write for debounced scroll-position
+  /// persistence — the caller ([_MessageListState] in column_view.dart) owns
+  /// the debounce timer; this is just the atomic (single-row) DB write it
+  /// targets. Deliberately skips `notifyListeners()`: scroll position isn't
+  /// part of any widget's build output, and firing on every debounced save
+  /// would rebuild the whole column tree for nothing.
+  Future<void> updateColumnScrollOffset(String id, double? scrollOffset) {
+    return _columns.updateColumnScrollOffset(id, scrollOffset);
   }
 
   /// Re-derives the column's branch from [parentId] itself rather than the

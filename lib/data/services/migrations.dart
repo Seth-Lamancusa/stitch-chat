@@ -20,6 +20,9 @@ final Map<int, Migration> migrations = {
     await m.createTable(db.columns);
     await m.createTable(db.columnBranchPointers);
   },
+  3: (m, db) async {
+    await m.addColumn(db.columns, db.columns.scrollOffset);
+  },
 };
 
 Future<void> runMigrations(Migrator m, AppDatabase db, int from, int to) async {

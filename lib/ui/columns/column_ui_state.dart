@@ -45,6 +45,13 @@ class ColumnUiState {
   bool isActive;
   List<MessageRowData> rows;
 
+  /// Persisted scroll offset, read once on column construction to restore
+  /// the list position on load. Not kept in sync with live scrolling —
+  /// [ColumnsViewModel.updateColumnScrollOffset] writes straight through to
+  /// the repository without mutating this field or notifying listeners, so
+  /// scrolling never triggers a column-wide rebuild.
+  final double? initialScrollOffset;
+
   MarkerVisualState topMarker;
   int topStitchCount;
   bool topLoading;
@@ -60,6 +67,7 @@ class ColumnUiState {
     this.width,
     this.isActive = false,
     this.rows = const [],
+    this.initialScrollOffset,
     this.topMarker = MarkerVisualState.end,
     this.topStitchCount = 0,
     this.topLoading = false,

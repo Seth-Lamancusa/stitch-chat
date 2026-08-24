@@ -3,9 +3,11 @@ import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'core/notifications/notification_overlay.dart';
 import 'core/notifications/notification_service.dart';
+import 'core/settings/theme_service.dart';
 import 'data/repositories/drift_column_repository.dart';
 import 'data/repositories/drift_message_repository.dart';
 import 'data/services/app_database.dart';
@@ -14,11 +16,14 @@ import 'data/services/python_process_service.dart';
 import 'domain/branch_path_service.dart';
 import 'ui/columns/columns_view.dart';
 import 'ui/columns/columns_viewmodel.dart';
+import 'ui/core/theme/app_theme.dart';
 
 final _pythonProcess = PythonProcessService();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  await windowManager.setTitle('Stitch');
 
   void handleTerminationSignal(_) {
     _pythonProcess.stop();
@@ -36,6 +41,9 @@ void main() async {
   final identityService = LocalIdentityService();
   await identityService.initialize();
 
+  final themeService = ThemeService();
+  await themeService.initialize();
+
   final db = AppDatabase();
   final messageRepository = DriftMessageRepository(db);
   final columnRepository = DriftColumnRepository(db);
@@ -46,13 +54,23 @@ void main() async {
 
   final notificationService = NotificationService();
 
-  runApp(StitchApp(columnsViewModel: columnsViewModel, notificationService: notificationService));
+  runApp(StitchApp(
+    columnsViewModel: columnsViewModel,
+    notificationService: notificationService,
+    themeService: themeService,
+  ));
 }
 
 class StitchApp extends StatefulWidget {
   final ColumnsViewModel columnsViewModel;
   final NotificationService notificationService;
-  const StitchApp({super.key, required this.columnsViewModel, required this.notificationService});
+  final ThemeService themeService;
+  const StitchApp({
+    super.key,
+    required this.columnsViewModel,
+    required this.notificationService,
+    required this.themeService,
+  });
 
   @override
   State<StitchApp> createState() => _StitchAppState();
@@ -97,17 +115,16 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
       providers: [
         ChangeNotifierProvider<NotificationService>.value(value: widget.notificationService),
         ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
+        ChangeNotifierProvider<ThemeService>.value(value: widget.themeService),
       ],
-      child: MaterialApp(
-        title: 'Stitch Chat',
-        theme: ThemeData(
-          brightness: Brightness.dark,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.deepPurple,
-            brightness: Brightness.dark,
-          ),
+      child: Consumer<ThemeService>(
+        builder: (context, themeService, _) => MaterialApp(
+          title: 'Stitch',
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: themeService.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+          home: const NotificationOverlay(child: ColumnsView()),
         ),
-        home: const NotificationOverlay(child: ColumnsView()),
       ),
     );
   }

@@ -20,7 +20,7 @@ class DriftColumnRepository implements ColumnRepository {
             width: Value(width),
           ),
         );
-    return ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
+    return ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width, scrollOffset: null);
   }
 
   @override
@@ -44,6 +44,12 @@ class DriftColumnRepository implements ColumnRepository {
   Future<void> updateColumnAnchor(String id, String anchorMessageId) {
     return (_db.update(_db.columns)..where((t) => t.id.equals(id)))
         .write(ColumnsCompanion(anchorMessageId: Value(anchorMessageId)));
+  }
+
+  @override
+  Future<void> updateColumnScrollOffset(String id, double? scrollOffset) {
+    return (_db.update(_db.columns)..where((t) => t.id.equals(id)))
+        .write(ColumnsCompanion(scrollOffset: Value(scrollOffset)));
   }
 
   @override
@@ -99,6 +105,11 @@ class DriftColumnRepository implements ColumnRepository {
   }
 
   ColumnMeta _toColumnMeta(ColumnRow row) {
-    return ColumnMeta(id: row.id, anchorMessageId: row.anchorMessageId, width: row.width);
+    return ColumnMeta(
+      id: row.id,
+      anchorMessageId: row.anchorMessageId,
+      width: row.width,
+      scrollOffset: row.scrollOffset,
+    );
   }
 }

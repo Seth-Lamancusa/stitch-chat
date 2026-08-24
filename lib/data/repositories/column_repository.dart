@@ -6,11 +6,13 @@ class ColumnMeta {
   final String id;
   final String? anchorMessageId; // null = no messages sent into this column yet
   final double? width; // null = flexible
+  final double? scrollOffset; // null = no saved scroll position
 
   const ColumnMeta({
     required this.id,
     required this.anchorMessageId,
     this.width,
+    this.scrollOffset,
   });
 }
 
@@ -30,6 +32,11 @@ abstract class ColumnRepository {
   Future<void> updateColumnWidth(String id, double? width);
 
   Future<void> updateColumnAnchor(String id, String anchorMessageId);
+
+  /// Fire-and-forget target for debounced scroll persistence — callers
+  /// decide the debounce policy, this just does the (atomic, single-row)
+  /// write.
+  Future<void> updateColumnScrollOffset(String id, double? scrollOffset);
 
   /// Atomic (parent, child) pointer-pair upsert for [columnId] — this pair
   /// is never updated independently, matching stitch-frontend's

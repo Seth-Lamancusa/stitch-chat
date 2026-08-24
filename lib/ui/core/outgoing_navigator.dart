@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'theme/app_colors.dart';
+
 /// Ported from stitch-frontend's `SiblingNavigator.vue`. Cycles the pool of
 /// candidates the *parent above this message* could show in this slot —
 /// i.e. this message's siblings. Matching the Vue source (mounted on the
@@ -121,8 +123,8 @@ class _OutgoingNavArrowState extends State<OutgoingNavArrow> {
 
   @override
   Widget build(BuildContext context) {
-    final backgroundColor = _getBackgroundColor();
-    final iconColor = _getIconColor();
+    final backgroundColor = _getBackgroundColor(context);
+    final iconColor = _getIconColor(context);
 
     return Tooltip(
       message: widget.tooltip,
@@ -157,37 +159,39 @@ class _OutgoingNavArrowState extends State<OutgoingNavArrow> {
     );
   }
 
-  Color _getBackgroundColor() {
+  Color _getBackgroundColor(BuildContext context) {
     if (!widget.enabled) {
       return Colors.transparent;
     }
 
+    final appColors = context.appColors;
     if (widget.isStitch) {
-      if (_isHovered) {
-        return Color.fromARGB(140, 76, 175, 80); // rgba(76, 175, 80, 0.55)
-      }
-      return Color.fromARGB(89, 76, 175, 80); // rgba(76, 175, 80, 0.35)
+      return _isHovered ? appColors.stitchGreenFillHover : appColors.stitchGreenFillIdle;
     }
 
     if (_isHovered) {
-      return Colors.white.withValues(alpha: 0.08);
+      return Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.08);
     }
     return Colors.transparent;
   }
 
-  Color _getIconColor() {
+  Color _getIconColor(BuildContext context) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+
     if (!widget.enabled) {
-      return Colors.white.withValues(alpha: 0.3);
+      return onSurface.withValues(alpha: 0.3);
     }
 
     if (widget.isStitch) {
+      // Fixed white, not onSurface: this sits on the stitchGreen fill above,
+      // not the page background, so it needs to stay legible in both themes.
       return Colors.white;
     }
 
     if (_isHovered) {
-      return Colors.white.withValues(alpha: 0.8);
+      return onSurface.withValues(alpha: 0.8);
     }
 
-    return Colors.white.withValues(alpha: 0.5);
+    return onSurface.withValues(alpha: 0.5);
   }
 }

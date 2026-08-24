@@ -76,6 +76,7 @@ class Columns extends Table {
   // until the first message is sent into it.
   TextColumn get anchorMessageId => text().references(Messages, #id).nullable()();
   RealColumn get width => real().nullable()(); // null = flexible
+  RealColumn get scrollOffset => real().nullable()(); // null = not yet scrolled / no saved position
 
   @override
   Set<Column> get primaryKey => {id};
@@ -119,7 +120,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(

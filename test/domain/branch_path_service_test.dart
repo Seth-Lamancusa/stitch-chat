@@ -113,6 +113,17 @@ class FakeColumnRepository implements ColumnRepository {
   }
 
   @override
+  Future<void> updateColumnScrollOffset(String id, double? scrollOffset) async {
+    final existing = _columns[id]!;
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: existing.width,
+      scrollOffset: scrollOffset,
+    );
+  }
+
+  @override
   Future<void> setBranchPointer(String columnId, String parentId, String childId) async {
     (_visibleOutgoing[columnId] ??= {})[parentId] = childId;
     (_visibleIncoming[columnId] ??= {})[childId] = parentId;

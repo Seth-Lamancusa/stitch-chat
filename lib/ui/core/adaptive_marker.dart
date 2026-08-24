@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'stitch_colors.dart';
+import 'theme/app_colors.dart';
 
 enum MarkerVisualState { waiting, loading, end, error }
 
@@ -125,7 +125,10 @@ class _DividerDots extends StatelessWidget {
           width: 4,
           height: 4,
           margin: const EdgeInsets.symmetric(horizontal: 1),
-          decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.24),
+            shape: BoxShape.circle,
+          ),
         ),
       ),
     );
@@ -140,8 +143,10 @@ class _StitchLoadButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final appColors = context.appColors;
     return Material(
-      color: StitchColors.surfaceContainerDark,
+      color: colorScheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(14),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
@@ -150,16 +155,16 @@ class _StitchLoadButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: StitchColors.stitchGreenBorderIdle),
+            border: Border.all(color: appColors.stitchGreenBorderIdle),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.link, size: 14, color: StitchColors.stitchGreen),
+              Icon(Icons.link, size: 14, color: appColors.stitchGreen),
               const SizedBox(width: 6),
               Text(
                 'Load $count stitch${count == 1 ? '' : 'es'}',
-                style: TextStyle(fontSize: 12, color: StitchColors.stitchGreen),
+                style: TextStyle(fontSize: 12, color: appColors.stitchGreen),
               ),
             ],
           ),

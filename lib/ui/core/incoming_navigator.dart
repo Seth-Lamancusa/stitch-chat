@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'stitch_colors.dart';
+import 'theme/app_colors.dart';
 
 /// Ported from stitch-frontend's `LinkSwitcher.vue`. Cycles the candidate
 /// pool a message exposes coming *into* it — which reply or stitch parent
@@ -102,13 +102,15 @@ class _OriginPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final appColors = context.appColors;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: StitchColors.surfaceDark,
+        color: colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: isStitch ? StitchColors.stitchGreenBorderIdle : StitchColors.borderDark,
+          color: isStitch ? appColors.stitchGreenBorderIdle : colorScheme.outlineVariant,
         ),
       ),
       child: Row(
@@ -122,14 +124,14 @@ class _OriginPill extends StatelessWidget {
           else if (isStitch)
             Padding(
               padding: const EdgeInsets.only(right: 3),
-              child: Icon(Icons.link, size: 10, color: StitchColors.stitchGreen),
+              child: Icon(Icons.link, size: 10, color: appColors.stitchGreen),
             ),
           Text(
             label,
             style: TextStyle(
               fontSize: 11,
               fontStyle: isStitch ? FontStyle.italic : FontStyle.normal,
-              color: Colors.white.withValues(alpha: 0.9),
+              color: colorScheme.onSurface.withValues(alpha: 0.9),
             ),
           ),
         ],
@@ -155,7 +157,7 @@ class _SwitcherArrow extends StatelessWidget {
         child: Icon(
           icon,
           size: 14,
-          color: enabled ? Colors.white.withValues(alpha: 0.7) : Colors.white.withValues(alpha: 0.15),
+          color: Theme.of(context).colorScheme.onSurface.withValues(alpha: enabled ? 0.7 : 0.15),
         ),
       ),
     );
