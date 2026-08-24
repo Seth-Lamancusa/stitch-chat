@@ -1,123 +1,127 @@
 ## Stitch Chat
 
-> Status note: much of the functionality described below remains unimplemented.
+> Status note: normative, unimplemented
 
-Stitch Chat is a desktop app for interacting with coding agents, chatbots, and human users. Integrations include OpenAI-compatible model servers (OpenAI, Anthropic, OpenRouter, etc) local model runtime servers (Ollama, LM Studio, etc), and coding agent runtimes that include built-in prompting and orchestration (Cursor, Claude Code, Codex, Antigravity). We interface with these servers and runtimes alike via a local proxy that normalizes their various formats and response mechanisms to a universal interface. Stitch aims to bring together local model or agent runtimes, cloud-based providers, and collaboration with human beings.
+Stitch Chat is a desktop app for interacting with AI agents, multimodal chatbots, and human users alike. Integrations may include OpenAI-compatible model response servers (OpenAI, Anthropic, OpenRouter, etc), local model servers (Ollama, LM Studio, etc), and coding agent runtimes that include built-in prompting and orchestration (Cursor, Claude Code, Codex, Antigravity, DS Harness, OpenCode, Aider, Meta Muse). We interface with these servers and runtimes alike via a local bridge that normalizes their various formats and response mechanisms to a universal interface, meaning the architecture extends to integrate with future models and orchestration harnesses, regardless of their invocation mechanism. Our cloud backend facilitates human participation in the same spaces. Stitch aims to bring together local AI, cloud-based models, and collaboration with human beings.
 
-The app integrates with the Stitch cloud backend, which powers human messaging. You can talk to local models, coding agents, or cloud model response providers (via the local proxy) without authenticating with your Stitch account, but authenticating buys you human messaging and message sync with the web app.
+You can talk to local models, coding agents, or cloud model response providers (via the local bridge) without authenticating with your Stitch account, but authenticating enables human messaging, access to Stitch cloud bots, and message sync with the web app.
 
 Run with `flutter run` to develop.
 
+To integrate a model (cloud or local), developers implement or utilize an existing **adapter** (if one exists, the bot may simply be registered). One adapter plugs one model response runtime into Stitch.
+
+### Data Model
+
+Stitch utilizes a generic data model for tracking conversations and messages. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and support connections between them for reply chaining and context engineering. The fundamental data model is that of the message.
+
+There are two kinds of directed links between messages: **reply**-like and **stitch**-like. Reply links are only (optionally) generated on message creation, while stitch links may be arbitrarily added. Both may be followed for context curation. A linearly connected subset of messages acts as the rendered thread and context object.
+
+This enables (potentially automatic) A/B iteration on prompts, models and context windows. You may reply to the same message multiple times or prompt multiple responses to the same message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side or programatically. We also version control the environment on the message node basis for comparing results between coding runtimes. 
+
+
+### Adapter Contract
+
+An adapter (along with its runtime) transforms one Stitch message (the initial bot invocation) and its preceding context into one or more asynchronous response messages. Bot invokations are processed in parallel, so one bot may process multiple messages at once. 
+
+Each adapter implementation may accept the following inputs:
+
+* Model and version, e.g.
+   - `@claude-code:sonnet-5.6 ...` → Claude Code runtime + model (required)
+   - `@cursor:gpt-sol-5.6` → Cursor runtime + model
+   - `@chatgpt:gpt-sol-5.6` → OpenAI runtime, OpenAI endpoint + model^
+* A cwd (where applicable)
+* One or more MCP server URLs (+ auth)
+
+And to emit:
+
+* One or more asynchronous response messages (potentially containing multipart media or function invocations and responses)
+* Token usage by in/out and pricing, for cost calculation
+
+Adapters have control over message contents and reply-chaining, which is unrestricted, not single response, subject to the constraint that a bot may reply only to nodes it has seen this invocation: any in the context chain, the trigger, plus any of its own prior emissions once ack'd. We stream traditional "content parts" (text blocks, function invocations/results) as individual (potentially chained) messages, not individual tokens. We do not collect or persist thinking/reasoning blocks as a special case, but possibly as a typed Stitch message that an adapter/runtime decides to broadcast.
+
+^ ChatGPT could be invoked via OpenAI, OpenRouter, or coding orchestration harnesses. Typically one popular model will have a canonical user ID to a simple response endpoint (OpenRouter or provider-hosted), and agentic coding harnesses are invoked as their own bot users, with version deciding the model, but the model/version paradigm is flexible: multiple versions of chatgpt can be configured per model, e.g. `@chatgpt:openrouter` vs `@chatgpt:openai`. Thinking effort and other model parameters fold into model versioning too, e.g. via `@claude-code:sonnet-5.6-high`.
 
 
 ### Architecture
 
-Cursor, Antigravity, Codex, and Claude Code expose Python SDKs. OpenAI, Anthropic, Google, and OpenRouter expose REST APIs, and so do local harnesses like Ollama. We use an IPC pattern to comminicate between our Flutter application and a lightweight Python server. The Python server handles API calls, local server lifecycle, and SDK interaction and normalizes responses from diverse model providers or runtimes.
-
-flutter-project-root/
-├── python-server/          # Your Python project
-│   ├── main.py             # Entry point
-│   ├── requirements.txt    # Dependencies (e.g., flask, pandas)
-│   ├── venv/               # Local virtual environment (ignored in git)
-│   └── build_dist.sh       # A script to run PyInstaller
-├── assets/                 # Where the built binary lives
-│   └── bin/
-│       └── server_linux    # The output from PyInstaller
-├── lib/                    # Flutter source
-└── pubspec.yaml            # Add assets/bin/ to assets:
-
-
-#### Data Model
-
-Stitch utilizes a general data model for tracking conversations, messages, and function invocations. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and support connections between them. The fundamental data model is that of the message. Abstractly:
+Some agentic coding harnesses like Cursor and Claude Code expose Python SDKs, while others like DS Harness runs one-shot headless with `dsh`. OpenAI, Anthropic, and other model providers expose remote REST APIs, and local harnesses like Ollama and OpenCode host them on your machine. Other local runtimes respond via SSE, WS or JSON-RPC over `stdio`, and others utilize none of these mechanisms. To unify these various regimes for model invocation, we use an IPC pattern to communicate between our Flutter application and a lightweight Python bridge server. The bridge adapts Stitch message chains to runtime-specific parameterizations and invokation mechanisms via an adapter implementaion. Invocations execute independently and emit response message nodes asynchronously, allowing multiple invocations (of one or many bots) to execute concurrently. Adapter implementations should be reentrant at the invocation boundary. This is natural in the HTTP regime, but for a stateful SDK may require e.g. instantiating a per-invocation client/session internally to the adapter implementation. An invocation may consist of one or many commands after it passes through an adapter.
 
 ```
-class Message:
-    content: str
-    role: str FK                 # Function call, response, author ID
-    parent-message-id: str       # Connects messages together
-    git-commit: opt str
-    etc
+Dart/Flutter
+    ↓    ↑
+Python server
+    ↓    ↑
+Adapter implementation
+    ↓    ↑
+Response runtime
 ```
 
-This enables iteration on prompts and context windows (via thread branching or forking - replying multiple times to the same message in the same context), as well as version control for comparing results between coding runtimes. Each set of messages simply connected by reply ancestry / descendence is a conversation tree with a single root message, and a linear subset of a conversation tree acts as the rendered thread and context object.
+A `runtime` is anything an adapter can invoke to produce model or agent output. It may be a remote service, local server, SDK, library, executable, protocol-speaking process, etc. Because of that flexibility, a bot is not limited to call-and-response (although practically, it will often implement this pattern). It may prioritize one of multiple messages arriving in quick succession, or respond to the original user message and context by logging its reasoning in a fork, comment on messages in the context, chain multiple messages to the users sequentially, etc.
 
-#### Python Runtime Registry
-
-Bot requests are dispatched by runtime, not hardcoded per bot. Each bot is a `BotConfig {bot_id, runtime, params}` — `runtime` selects a handler class, `params` differentiate individual bots that share the same handler (e.g. base_url, model name, api_key). There are two runtime regimes:
-
-* **SDK regime** — one handler per SDK, since each has its own session/invocation model: `ClaudeCodeHandler`, `CursorHandler`, `AntigravityHandler`. No sharing across these beyond the common `handle(message) -> response` interface.
-* **API regime** — fewer handlers than bots, shared by contract shape rather than by provider:
-  e.g. `OpenAICompatibleHandler(base_url, model)` — covers OpenRouter (cloud) and Ollama (local), and any future provider speaking OpenAI's chat/completions schema. One class, many bots via different `params`.
-
-This paradigm also supports direct subprocess invocation for any tool that doesn't expose an API or an SDK, or any other kind of runtime abstraction.
-
-Separation: A `RuntimeRegistry` maps `bot_id -> (handler class, params)`. Handlers assume their `base_url` is already live and only do request/response — they don't manage process lifecycle. Local API runtimes (OpenCode, Ollama) need a local server process running before a handler can talk to them. A `LocalServerManager` checks whether a runtime depends to a local server and whether it's already up, spawns it if not, health-checks it, and tears it down on app exit. Handlers for local runtimes depend on this but don't own it, and return regular HTTP status codes.
+The Python server provides a bot manifest from a `BotRegistry`, advertising capabilities and availability. Dart doesn't know about adapters or runtimes.
 
 
-### Interface
+#### Ownership
 
-We use a WebSocket connection between the Dart client and the Python server to exchange information. This enables "typing" indicators, response part streaming, and asynchronous invocation of different models. Dart doesn't know how to talk to any runtime, it only knows *which bot* a message is for. It looks up the bot locally and forwards the message to the Python server over the WS. All the runtime-specific work happens on the far side of that hop.
+* **Dart owns** — persistence (local and cloud, abstract repo implementations), environment lifecycle (materialization and teardown), snapshot creation, message identity, and the mapping from message nodes to environment state.
+* **Python bridge owns** — bot registry, adapter invocation, response normalization, process supervision, and `reply_to` validation.
+* **Adapter owns** — Stitch message + context → runtime call, and runtime output → Stitch nodes.
+* **Runtime owns** — response generation and emission, model sandboxing, permissions, and capabilities.
 
-* Flutter launches the bundled Python server as a local subprocess on app start (see `build_dist.sh`/PyInstaller layout above) and opens one persistent WS connection to it.
-* One connection multiplexes every bot and every open conversation — there's no per-bot or per-conversation socket. Every payload carries enough addressing (`bot_id`, `parent_message_id`) for either side to route it.
+#### How Adapters Partition Bots
 
-Each response runtime is expected to provide the following input options:
-* A way to specify what model and version to use (Dart sends bot id and canonical version, bridge maps to runtime and bespoke model / version combination), e.g.
-   - "@claude-code:sonnet-5.6 ..." --> claude code runtime + model
-   - "@cursor:gpt-sol-5.6" --> cursor runtime + model
-   - "@chatgpt:gpt-sol-5.6" --> OpenAI runtime, OpenAI endpoint + model^
-* A way to specify the cwd
+A single runtime adapter may facilitate access to many models (e.g. an OpenAI compatible REST runtime). Adapters partitions registered bot models neither by their execution environment (local vs cloud, in- vs out-of-process, etc) nor their provider (OpenAI, Anthropic, etc) _necessarily_, but by the **means of invocation** and **parameterization**. If two methods share both their means of invocation _and_ how Stitch message parameters map to that invocation, they should share a runtime adapter. Take for example three common invocation regimes:
 
-And output fields:
-* One or more responses (optionally over time) - rendered and ingested on Dart side as list of consecutive messages by the same author with previous (chained) parent IDs
-* Token usage by in / out and pricing (for cost calculation)
+* **SDK regime** — generally one adapter per SDK, since each has its own session/invocation model: `ClaudeCodeAdapter`, `CursorAdapter`, `AntigravityAdapter`
+* **API regime** — `OpenAICompatibleAdapter` is one concrete class covering OpenRouter (cloud), Ollama (local), and any future provider speaking OpenAI's chat/completions schema
+* **Subprocess regime** — similar to the SDK regime, insofar as each subprocess invocation or commandline interface maps Stitch fields differently to functionality
 
-What about MCP capabilities and function calling?
+Within a regime, adapters may share a common base class or utilities (e.g. for spawn, capture, kill, request, response, etc) but will not necessarily share an adapter implementation just because they look similar, and regimes that look different at a glance (local vs cloud HTTP) may share an adapter.
 
-^ ChatGPT could be invoked via OpenAI, OpenRouter, or coding orchestration harnesses. Typically, one popular model will have a canonical user ID that maps to a simple response endpoint (be it OpenRouter or provider-hosted), and agentic coding harnesses are invoked as their own bots users (with version deciding the model). Note that the model / version paradigm is flexible, and it's also possible to configure multiple versions of chatgpt for each endpoint: e.g. "@chatgpt:openrouter" vs "@chatgpt:openai". Thinking effort can also be folded into model verisons as e.g. "@claude-code:sonnet-5.6-high" for high effort. This generally goes for any SDK options. Stitch has canonical users with IDs and possibly mutliple versions, the backend registers these as cloud users, and the Flutter app in this repo registers them locally and associates them with a runtime and parameterization.
+#### Layer Interfaces
 
+Each layer (Dart, bridge, adapter, runtime) communicates with its neighbors via specific protocols and schemas.
 
-### Cloud-based Interaction
+1. **Dart <--> bridge** - we multiplex a single websocket connection across conversations and models using two envelopes: one for messages / invocations, and one for cues like typing, awaiting-approval, etc.
+2. **bridge <--> adapter** - the abstract adapter class defines the invocation contract (roughly a Stitch message + context, bot recipient, environment, and capabilities), and emits response messages asynchronously. The bridge uses a bot registry to map bot IDs to adapters.
+3. **adapter <--> runtime** - the adapter implementation decides how to invoke its particular model runtime, and with what parameters. The glue and duct tape goes here if needed.
 
-The proxy server handles responses instantaneously (arbitrarily finite response time, returned in-process). Human user responses are not necessarily instantaneous, and of course are not generated by a local runtime (conceptually this may be true for model responses too). Bots registered with our local runtime are tagged in the UI as "local users". A user may authenticate with the Stitch cloud for message sync, private message access, and posting messages to other users.
+The adapter and runtime together decide *how to respond* — the rest is product, transport, validation, and enforcement. 
 
-**Before authenticating** - Before authenticating with the Stitch cloud, a user can interact with local models configured as runtimes, and also access public cloud messages by cloud users.
+#### Filesystem Snapshots
 
-**After authenticating** - After authenticating, a user can access their private messages via the Stitch Chat app, post messages to other cloud users, and sync their messages (including interactions with local bots) with the Stitch cloud backend.
+> A filesystem-backed invocation executes against a materialized environment derived from the parent message’s environment state. Stitch snapshots resulting state and associates it with emitted message nodes.
 
-A small laptop emoji chip beside user tags in message tags or author labels distinguish cloud from local users.
+Stitch versions your working directory recursively (up to a practical size constraint) when you pass it to a model as your `cwd` (generally optional) for the purposes of rollback and branch comparison. We do not sandbox the environment based on the `cwd`. Model sandboxing and permissioning (confinement) belongs to the runtime. Snapshot refs are associated directly with message nodes - "what the cwd looked like at this message". One nuance here: behavior can exceed cwd scope, via shell commands, shared config modifications, external tooling, etc. The snapshot is technically best-effort and practical. Materialized directories are ephemeral realizations of persistent snapshot state for model invocation context. Snapshots are authoritative; working directories are caches. Simplifies cleanup, lazy materialization, branching, and rematerialization. The user's actual "working directory" they see on their filesystem and test on is independent of either of these and automatically fast-forwarded to to the most recent response with UI on the node for clarity. 
 
+Snapshots use Git’s object database as a content-addressed store, but Stitch does not use Git as a working-copy manager. Stitch walks the environment itself, hashes file contents, constructs tree objects, and records the resulting commit/tree identifier. This avoids `.gitignore`, nested-repository gitlinks, and mutation of the user’s branch or staging area. Untracked files are generally included subject to explicit space-policy exclusions; nested repositories are treated as ordinary filesystem content for snapshot purposes; actual repository HEADs are recorded separately as metadata/indexing; deduplication comes from Git object identity.
 
-### Notes
+Materialization and snapshotting are lazy and content-addressed. Concurrent invocations require separate working directories. Large generated trees remain the principal practical cost; exclusions such as `node_modules`, `.venv`, and build outputs are therefore a storage policy rather than `.gitignore` semantics. We accept non-trivial snapshot materialization and persistent timing as negligible next to model response times, and the practical size constraint that caps this functionality reflects that principle. 
 
-Use a Process Manager pattern (e.g., Python's psutil). When the LocalServerManager stops a bot, it should traverse the process tree (SIGTERM) of the specific child PID to ensure the environment is fully wiped. Don't bundle one large environment. Use venv per SDK. Give each SDK handler its own directory. This avoids dependency hell between, say, an old version of anthropic's SDK and a newer Cursor SDK. Rather than hardcoding the `RuntimeRegistry`, let the Python server provide a manifest upon connection with available runtimes for dynamic bot availability UI.
+#### Cloud-based Interaction
+- Bridge handles responses in-process with arbitrarily finite response time; human responses aren't instantaneous, and conceptually neither are model responses.
+- Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). TBD: good UI representations for cloud vs. locally _registered_, plus common cross-cutting cases (cloud-backed response generation, local response gen + external tooling, fully local, simply human, etc) and a coherent, comprehensive definition on the user level (to be advertised by the bot registry for bots registered locally, or otherwise inferred from cloud user attributes including `is-bot`).
+- Before authenticating: interact with local models, access _public_ cloud messages from cloud users.
+- After authenticating: access private messages, post to other cloud users, sync local-bot interactions with cloud backend.
 
-We do not stream individual tokens, but content parts like response text blocks, function invocations, and responses. We do not collect or persist "thinking" or "reasoning" blocks.
+#### Error Handling
+- All user-facing errors route through a single `NotificationService` (`lib/core/notifications/`) rather than ad-hoc `errorMessage` state on ViewModels.
+- Toast (non-blocking, default) — scoped to one failed operation, rest of app stays usable, auto-dismisses.
+- Blocking banner (`blocking: true`) — reserved for app-unusable errors (e.g. bridge connection down), persists until dismissed. Use sparingly — default-blocking trains users to reflexively dismiss.
+- Every notification gets a copy button for free (paste error text into a bug report without transcribing).
+- `NotificationOverlay` renders whatever `NotificationService` holds, wraps app root — new screens/ViewModels just inject the service, no bespoke error UI.
 
+### Tips
+- Prefer new files for new logic/classes over appending to existing files.
+- Detailed docs live in `./docs`.
+- Make mouse cursor shape responsive to button hovers (`SystemMouseCursors.click`) generally, not case-by-case.
 
-### Error Handling
-
-All user-facing errors route through a single `NotificationService` (`lib/core/notifications/`) rather than living as ad-hoc state on individual ViewModels. A ViewModel or repository that hits an error calls `notificationService.showError(...)` instead of holding its own `errorMessage` field — this is what "centralize error handling" (see `docs/flutter-best-practices.md`) means concretely in this codebase.
-
-* **Toast (non-blocking, default)** — for errors scoped to a single operation, e.g. one message failing to send. The rest of the app stays usable. Auto-dismisses after its `duration`, or on manual close; both dismissal paths animate the same way.
-* **Blocking banner** (`blocking: true`) — reserved for errors that make the whole app unusable in its current state (e.g. the Python server connection is down). Persists until the user dismisses it. Use sparingly — defaulting to blocking trains users to reflexively dismiss without reading.
-* Every notification (toast or banner) gets a copy button for free, so users can paste error text into a bug report without transcribing it.
-* `NotificationOverlay` renders whatever `NotificationService` currently holds and wraps the app root — new screens/ViewModels don't need to render their own error UI, just inject `NotificationService` and call it.
-
-
-## Tips
-
-* Prefer creating new files for new logic, classes, and so on over appending to existing files.
-* For detailed documentation, see the `./docs` directory.
-* Make the mouse cursor shape responsive to button hovers (e.g. `SystemMouseCursors.click`) in general, not just on a case-by-case basis.
-
-
-
-## Resources
-
+### Resources
+- [Best Practices](./docs/best-practices.md)
 - [Flutter Docs](https://docs.flutter.dev)
 - [Antigravity SDK](https://antigravity.google/docs/sdk/overview)
 - [Cursor SDK](https://cursor.com/docs/sdk/python)
 - [Claude Code SDK](https://code.claude.com/docs/en/agent-sdk/overview)
 - [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
+
+### Thanks for reading
