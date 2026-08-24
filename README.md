@@ -37,7 +37,7 @@ And to emit:
 * One or more asynchronous response messages (potentially containing multipart media or function invocations and responses)
 * Token usage by in/out and pricing, for cost calculation
 
-Adapters have control over message contents and reply-chaining, which is unrestricted, not single response, subject to the constraint that a bot may reply only to nodes it has seen this invocation: any in the context chain, the trigger, plus any of its own prior emissions once ack'd. 
+Adapters have control over message contents and reply-chaining, which is unrestricted, not single response, subject to the constraint that a bot may reply only to nodes it has seen this invocation: any in the context chain, the trigger, plus any of its own prior emissions once ack'd. We stream traditional "content parts" (text blocks, function invocations/results) as individual (potentially chained) messages, not individual tokens. We do not collect or persist thinking/reasoning blocks as a special case, but possibly as a typed Stitch message that an adapter/runtime decides to broadcast.
 
 ^ ChatGPT could be invoked via OpenAI, OpenRouter, or coding orchestration harnesses. Typically one popular model will have a canonical user ID to a simple response endpoint (OpenRouter or provider-hosted), and agentic coding harnesses are invoked as their own bot users, with version deciding the model, but the model/version paradigm is flexible: multiple versions of chatgpt can be configured per model, e.g. `@chatgpt:openrouter` vs `@chatgpt:openai`. Thinking effort and other model parameters fold into model versioning too, e.g. via `@claude-code:sonnet-5.6-high`.
 
@@ -57,6 +57,8 @@ Response runtime
 ```
 
 A `runtime` is anything an adapter can invoke to produce model or agent output. It may be a remote service, local server, SDK, library, executable, protocol-speaking process, etc. Because of that flexibility, a bot is not limited to call-and-response (although practically, it will often implement this pattern). It may prioritize one of multiple messages arriving in quick succession, or respond to the original user message and context by logging its reasoning in a fork, comment on messages in the context, chain multiple messages to the users sequentially, etc.
+
+The Python server provides a bot manifest from a `BotRegistry`, advertising capabilities and availability. Dart doesn't know about adapters or runtimes.
 
 
 #### Ownership
@@ -86,7 +88,7 @@ Each layer (Dart, bridge, adapter, runtime) communicates with its neighbors via 
 
 The adapter and runtime together decide *how to respond* — the rest is product, transport, validation, and enforcement. 
 
-### Filesystem Snapshots
+#### Filesystem Snapshots
 
 > A filesystem-backed invocation executes against a materialized environment derived from the parent message’s environment state. Stitch snapshots resulting state and associates it with emitted message nodes.
 
@@ -95,5 +97,31 @@ Stitch versions your working directory recursively (up to a practical size const
 Snapshots use Git’s object database as a content-addressed store, but Stitch does not use Git as a working-copy manager. Stitch walks the environment itself, hashes file contents, constructs tree objects, and records the resulting commit/tree identifier. This avoids `.gitignore`, nested-repository gitlinks, and mutation of the user’s branch or staging area. Untracked files are generally included subject to explicit space-policy exclusions; nested repositories are treated as ordinary filesystem content for snapshot purposes; actual repository HEADs are recorded separately as metadata/indexing; deduplication comes from Git object identity.
 
 Materialization and snapshotting are lazy and content-addressed. Concurrent invocations require separate working directories. Large generated trees remain the principal practical cost; exclusions such as `node_modules`, `.venv`, and build outputs are therefore a storage policy rather than `.gitignore` semantics. We accept non-trivial snapshot materialization and persistent timing as negligible next to model response times, and the practical size constraint that caps this functionality reflects that principle. 
+
+#### Cloud-based Interaction
+- Bridge handles responses in-process with arbitrarily finite response time; human responses aren't instantaneous, and conceptually neither are model responses.
+- Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). TBD: good UI representations for cloud vs. locally _registered_, plus common cross-cutting cases (cloud-backed response generation, local response gen + external tooling, fully local, simply human, etc) and a coherent, comprehensive definition on the user level (to be advertised by the bot registry for bots registered locally, or otherwise inferred from cloud user attributes including `is-bot`).
+- Before authenticating: interact with local models, access _public_ cloud messages from cloud users.
+- After authenticating: access private messages, post to other cloud users, sync local-bot interactions with cloud backend.
+
+#### Error Handling
+- All user-facing errors route through a single `NotificationService` (`lib/core/notifications/`) rather than ad-hoc `errorMessage` state on ViewModels.
+- Toast (non-blocking, default) — scoped to one failed operation, rest of app stays usable, auto-dismisses.
+- Blocking banner (`blocking: true`) — reserved for app-unusable errors (e.g. bridge connection down), persists until dismissed. Use sparingly — default-blocking trains users to reflexively dismiss.
+- Every notification gets a copy button for free (paste error text into a bug report without transcribing).
+- `NotificationOverlay` renders whatever `NotificationService` holds, wraps app root — new screens/ViewModels just inject the service, no bespoke error UI.
+
+### Tips
+- Prefer new files for new logic/classes over appending to existing files.
+- Detailed docs live in `./docs`.
+- Make mouse cursor shape responsive to button hovers (`SystemMouseCursors.click`) generally, not case-by-case.
+
+### Resources
+- [Best Practices](./docs/best-practices.md)
+- [Flutter Docs](https://docs.flutter.dev)
+- [Antigravity SDK](https://antigravity.google/docs/sdk/overview)
+- [Cursor SDK](https://cursor.com/docs/sdk/python)
+- [Claude Code SDK](https://code.claude.com/docs/en/agent-sdk/overview)
+- [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
 
 ### Thanks for reading
