@@ -169,13 +169,38 @@ class ColumnsViewModel extends ChangeNotifier {
     }
   }
 
-  /// Sends [content] as a reply under [columnId]'s current bottom message
-  /// (or as a fresh root if the column has no messages yet), and advances
-  /// the column's persisted anchor to it — per column-ui-impl-plan.md §3,
-  /// "the anchor is a persisted, moving reference point."
+  /// Marks [messageId] as the parent the next [sendMessage] call in
+  /// [columnId] should reply under, overriding the default bottom-row
+  /// target — set by a message's "reply to" action. Pass `null` to cancel
+  /// and fall back to the default. Also activates [columnId]: replying is
+  /// only actionable through the active column's composer, so triggering it
+  /// from a non-active column (another visible branch) must switch focus
+  /// there, same as clicking the column itself would.
+  void setReplyTarget(String columnId, String? messageId) {
+    for (final state in _states) {
+      state.isActive = state.id == columnId;
+    }
+    _stateFor(columnId).replyingToMessageId = messageId;
+    notifyListeners();
+  }
+
+  /// Sends [content] as a reply under [columnId]'s pending reply target
+  /// ([ColumnUiState.replyingToMessageId], set via [setReplyTarget]) if one
+  /// is set, otherwise under the column's current bottom message (or as a
+  /// fresh root if the column has no messages yet). Forking under a
+  /// non-terminal target is a single [ColumnRepository.setBranchPointer]
+  /// call away from also becoming the visible branch: that table is
+  /// uniquely keyed on `(columnId, parentId)`, so pointing the fork
+  /// message's pointer at the new message atomically both creates the
+  /// branch and switches the column to it — no separate rewrite step is
+  /// needed for ancestors, which are untouched, or for the new leaf, which
+  /// has no descendants yet. Advances the column's persisted anchor to the
+  /// new message either way — per column-ui-impl-plan.md §3, "the anchor is
+  /// a persisted, moving reference point."
   Future<void> sendMessage(String columnId, String content) async {
     if (content.trim().isEmpty) return;
     final state = _stateFor(columnId);
+    final parentId = state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
     final newMessage = Message(
       id: _uuid.v4(),
       role: MessageRole.user,
@@ -185,12 +210,12 @@ class ColumnsViewModel extends ChangeNotifier {
     );
     await _messages.saveMessage(newMessage);
 
-    if (state.rows.isNotEmpty) {
-      final bottomId = state.rows.last.message.id;
-      await _messages.addReplyEdge(bottomId, newMessage.id);
-      await _columns.setBranchPointer(columnId, bottomId, newMessage.id);
+    if (parentId != null) {
+      await _messages.addReplyEdge(parentId, newMessage.id);
+      await _columns.setBranchPointer(columnId, parentId, newMessage.id);
     }
 
+    state.replyingToMessageId = null;
     await _columns.updateColumnAnchor(columnId, newMessage.id);
     _anchors[columnId] = newMessage.id;
     await _refresh(columnId);

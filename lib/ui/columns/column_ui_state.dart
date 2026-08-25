@@ -62,6 +62,12 @@ class ColumnUiState {
   bool bottomLoading;
   String? bottomError;
 
+  /// Id of the message the next [ColumnsViewModel.sendMessage] call should
+  /// reply under, set by the "reply to" action on a mid-column message and
+  /// cleared once that send completes (or the user cancels it). Null means
+  /// the default target — the current bottom row — applies instead.
+  String? replyingToMessageId;
+
   ColumnUiState({
     required this.id,
     this.width,
@@ -76,5 +82,6 @@ class ColumnUiState {
     this.bottomStitchCount = 0,
     this.bottomLoading = false,
     this.bottomError,
+    this.replyingToMessageId,
   });
 }

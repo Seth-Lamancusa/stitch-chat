@@ -150,7 +150,23 @@ class _OutgoingNavArrowState extends State<OutgoingNavArrow> {
                       ),
                     )
                   : Center(
-                      child: Icon(widget.icon, size: 14, color: iconColor),
+                      // Icons.chevron_left/right come from the fixed-weight
+                      // MaterialIcons font, not a variable one, so there's no
+                      // `weight`/`fill` knob to make the glyph read as
+                      // bolder. Painting it twice with a 1px offset fakes
+                      // extra stroke weight instead.
+                      child: widget.enabled
+                          ? Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                Icon(widget.icon, size: 16, color: iconColor),
+                                Transform.translate(
+                                  offset: const Offset(0.6, 0),
+                                  child: Icon(widget.icon, size: 16, color: iconColor),
+                                ),
+                              ],
+                            )
+                          : Icon(widget.icon, size: 14, color: iconColor),
                     ),
             ),
           ),
@@ -189,9 +205,9 @@ class _OutgoingNavArrowState extends State<OutgoingNavArrow> {
     }
 
     if (_isHovered) {
-      return onSurface.withValues(alpha: 0.8);
+      return onSurface.withValues(alpha: 1.0);
     }
 
-    return onSurface.withValues(alpha: 0.5);
+    return onSurface.withValues(alpha: 0.85);
   }
 }
