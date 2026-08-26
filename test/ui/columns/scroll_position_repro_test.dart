@@ -130,8 +130,12 @@ void main() {
     await tester.drag(scrollableFinder.first, const Offset(0, 300));
     await tester.pumpAndSettle();
 
+    // Column A's `CustomScrollView` is centered on its persisted anchor
+    // (the last/bottom message), so dragging toward older content — which
+    // lives in the before-anchor sliver — moves `pixels` negative, not
+    // positive as it would in the old `reverse: true` ListView.
     final offsetAfterScroll = tester.state<ScrollableState>(scrollableFinder.first).position.pixels;
-    expect(offsetAfterScroll, greaterThan(0));
+    expect(offsetAfterScroll, lessThan(0));
 
     await tester.tap(find.byKey(ValueKey(colB.id)).first);
     await tester.pumpAndSettle();

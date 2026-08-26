@@ -178,29 +178,15 @@ class _MessageListState extends State<_MessageList> {
   bool _restoredInitialOffset = false;
   Timer? _scrollSaveTimer;
 
-  // Anchored scroll preservation.
-  //
-  // Switching a branch replaces a run of rows, and the replacement rarely
-  // has the same height as what it displaced — left alone, that shifts every
-  // message on screen. Both navigators have exactly one row whose identity
-  // survives the switch, and it's the one the user is reading *from*:
-  //
-  //   * sibling/outgoing swap — the parent above (`outgoingAnchorId`); the
-  //     row the arrows flank becomes a different message entirely.
-  //   * parent/incoming swap — the message itself; what changes is the
-  //     context assembled above it.
-  //
-  // So we pin that row's on-screen position across the mutation. Ported in
-  // spirit from stitch-frontend's `LinkSwitcher`/`ThreadView` pair, which
-  // runs the same measure/mutate/re-measure/correct pass on `scrollTop`:
-  // Flutter has no equivalent of CSS `overflow-anchor`, and true
-  // sliver-level anchoring (`CustomScrollView` with a `center` key) would
-  // mean rebuilding this list around a two-sided viewport.
-  final Map<String, GlobalKey> _rowKeys = {};
-
-  // See `_navigateAnchored`: masks the single frame where the mutated rows
-  // have landed but the corrective jump hasn't applied yet.
-  bool _hideForCorrection = false;
+  // Identifies the pinned *slot* in the sliver list passed to
+  // `CustomScrollView.center` — not the anchor message itself, which
+  // changes across builds as the user navigates forks. Because slivers
+  // before this key grow backward (negative offset) and slivers after it
+  // grow forward, whichever row currently lands in the center sliver simply
+  // never moves on screen when content on either side is replaced by a
+  // fork switch — a layout invariant, not something asserted after the fact
+  // with `jumpTo` like the old `ListView(reverse: true)` approach required.
+  final Key _centerKey = UniqueKey();
 
   @override
   void initState() {
@@ -221,92 +207,21 @@ class _MessageListState extends State<_MessageList> {
   /// generic "row count changed" reaction in [didUpdateWidget]: that would
   /// also fire for [loadStitchAbove]/[loadStitchBelow] (an explicit "load
   /// more" tap, which shouldn't also yank the view) and for branch switches
-  /// (already handled, and in the opposite way, by [_navigateAnchored]).
-  /// Scroll intent lives with the action that causes it instead of being
+  /// (already handled, and in the opposite way, by the column's persisted
+  /// anchor — see `_centerKey`). Scroll intent lives with the action that
+  /// causes it instead of being
   /// inferred after the fact from its side effects.
   void sendAndStickToBottom(void Function() action) {
     final wasAtBottom = _isAtBottom;
     action();
-    if (wasAtBottom) _scrollToBottom();
-  }
-
-  GlobalKey _rowKey(String messageId) =>
-      _rowKeys.putIfAbsent(messageId, () => GlobalKey());
-
-  /// Screen-space top edge of [messageId]'s row, or null when it can't be
-  /// measured — no key yet, or the row is scrolled far enough out of view
-  /// that the sliver never mounted an element for it.
-  double? _rowTop(String messageId) {
-    final rowContext = _rowKeys[messageId]?.currentContext;
-    if (rowContext == null) return null;
-    final box = rowContext.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) return null;
-    return box.localToGlobal(Offset.zero).dy;
-  }
-
-  /// Runs [action] (a branch switch) while holding [anchorMessageId]'s row
-  /// still on screen. Best effort by design: if the anchor can't be measured
-  /// on either side, or the correction would run past the ends of the list,
-  /// the scroll simply settles wherever it can rather than inventing blank
-  /// space to preserve an exact offset.
-  ///
-  /// Known limitation, accepted rather than engineered around: this can only
-  /// redistribute scroll range that already exists. When the branch fits
-  /// entirely inside the viewport both before and after the swap,
-  /// `maxScrollExtent` is `0` — there is no valid scroll position other than
-  /// `0` — so the computed target clamps straight back to where it started
-  /// and the anchor visibly moves anyway. Fixing that would mean anchoring
-  /// via a `CustomScrollView` with a `center` sliver (the pivot's on-screen
-  /// position is then a layout invariant, not something asserted after the
-  /// fact by `jumpTo`), which is a much larger rework not undertaken here.
-  Future<void> _navigateAnchored(
-    String anchorMessageId,
-    Future<void> Function() action,
-  ) async {
-    final before = _rowTop(anchorMessageId);
-    if (before == null) return action();
-
-    // Nothing is hidden yet: whatever's on screen now stays exactly as it is
-    // for however long `action` (a real, unbounded-latency repo round trip)
-    // takes — hiding proactively would black out the view for that entire
-    // wait, not just the one frame that actually needs masking.
-    await action();
-    if (!mounted) return;
-
-    // `action` just called notifyListeners(), which marks the tree dirty but
-    // only *schedules* a frame — it doesn't run one synchronously. Setting
-    // this now, before that frame builds, gets coalesced into the same frame
-    // as the row-data rebuild (Flutter batches every `markNeedsBuild` that
-    // lands before the next vsync into one build pass), so the very first
-    // frame with the new rows paints hidden rather than at the wrong
-    // position.
-    setState(() => _hideForCorrection = true);
-
-    // The anchor's new position isn't knowable until that frame has laid
-    // out, so the correction has to wait for it to end.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      try {
-        if (!_scrollController.hasClients) return;
-        final after = _rowTop(anchorMessageId);
-        if (after == null) return;
-
-        final position = _scrollController.position;
-        // `reverse: true`, so a *rising* pixel offset scrolls toward older
-        // messages and moves any given row *down* the screen. That makes the
-        // correction the raw difference rather than its negation.
-        final target = (position.pixels + (before - after)).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        );
-        if ((target - position.pixels).abs() >= 0.5) {
-          _scrollController.jumpTo(target);
-          _updateIsAtBottom();
-        }
-      } finally {
-        if (mounted) setState(() => _hideForCorrection = false);
-      }
-    });
+    // `action` (a real repo round trip) only *schedules* the rebuild that
+    // lays out the new row — reading `maxScrollExtent` before that frame
+    // runs would target the stale, pre-send extent, undershooting by one
+    // message. Deferring to a post-frame callback lets `_scrollToBottom`
+    // read the extent that actually includes the new row.
+    if (wasAtBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    }
   }
 
   void _onScroll() {
@@ -316,14 +231,14 @@ class _MessageListState extends State<_MessageList> {
 
   void _updateIsAtBottom() {
     if (!_scrollController.hasClients) return;
-    // reverse: true means pixels: 0 is the bottom (newest message).
-    _isAtBottom = _scrollController.position.pixels <= _bottomThreshold;
+    final position = _scrollController.position;
+    _isAtBottom = (position.maxScrollExtent - position.pixels) <= _bottomThreshold;
   }
 
   void _scrollToBottom() {
     if (!_scrollController.hasClients) return;
     _scrollController.animateTo(
-      0,
+      _scrollController.position.maxScrollExtent,
       duration: const Duration(milliseconds: 200),
       curve: Curves.easeOut,
     );
@@ -352,8 +267,12 @@ class _MessageListState extends State<_MessageList> {
     _restoredInitialOffset = true;
     final offset = widget.state.initialScrollOffset;
     if (offset == null) return;
+    final position = _scrollController.position;
+    // Offsets into the before-anchor sliver are legitimately negative now
+    // (`minScrollExtent` is negative for a `center`-based CustomScrollView),
+    // unlike the old reversed ListView where 0 was always the lower bound.
     _scrollController.jumpTo(
-      offset.clamp(0.0, _scrollController.position.maxScrollExtent),
+      offset.clamp(position.minScrollExtent, position.maxScrollExtent),
     );
     _updateIsAtBottom();
   }
@@ -380,67 +299,113 @@ class _MessageListState extends State<_MessageList> {
       (_) => _maybeRestoreInitialOffset(),
     );
 
-    return Opacity(
-      opacity: _hideForCorrection ? 0 : 1,
-      child: ListView(
-        controller: _scrollController,
-        // reverse: true so the list is anchored to the newest message (pixels:
-        // 0 is the bottom): new messages append without disturbing a user who
-        // has scrolled up, and staying pinned at the bottom needs no explicit
-        // scroll-to-end handling from layout.
-        reverse: true,
-        // Reserved unconditionally (not just while active) so selecting or
-        // deselecting a column never changes the list's scroll extents.
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 70),
-        children: [
-          // Children are in reverse visual order: index 0 renders at the
-          // bottom (newest), so the bottom marker comes first and the top
-          // marker last.
-          AdaptiveMarker(
-            isTop: false,
-            state: state.bottomLoading
-                ? MarkerVisualState.loading
-                : (state.bottomError != null
-                      ? MarkerVisualState.error
-                      : state.bottomMarker),
-            stitchCount: state.bottomStitchCount,
-            errorMessage: state.bottomError,
-            onLoadStitches: () => vm.loadStitchBelow(state.id),
-            onRetry: () => vm.loadStitchBelow(state.id),
+    // The persisted anchor (`ColumnsViewModel.anchorOf`) is already exactly
+    // the row that must stay visually fixed across a fork switch:
+    // `navigateOutgoing`/`navigateIncoming` re-anchor it to `parentId`/
+    // `childId` respectively — the one row each swap leaves untouched. It's
+    // guaranteed present in `state.rows` because `getFullVisibleBranch`
+    // always builds `[...above, anchor, ...below]` from this same id, and
+    // `state.rows` is only non-empty when an anchor exists (see the
+    // early-return above).
+    final anchorId = vm.anchorOf(state.id);
+    final anchorIndex = state.rows.indexWhere(
+      (r) => r.message.id == anchorId,
+    );
+    assert(
+      anchorIndex != -1,
+      'persisted anchor $anchorId missing from derived branch',
+    );
+
+    final showAuthorById = <String, bool>{
+      for (int i = 0; i < state.rows.length; i++)
+        state.rows[i].message.id:
+            i == 0 ||
+            _authorKey(state.rows[i].message) !=
+                _authorKey(state.rows[i - 1].message),
+    };
+
+    // Slivers listed before `center` grow backward (negative offset), so
+    // this sliver's own child order must have index 0 closest to the
+    // anchor (the row immediately above it) and increasing index moving
+    // further back in time, ending in the top marker.
+    final beforeRows = state.rows.sublist(0, anchorIndex).reversed.toList();
+    final centerRow = state.rows[anchorIndex];
+    final afterRows = state.rows.sublist(anchorIndex + 1);
+
+    return CustomScrollView(
+      controller: _scrollController,
+      center: _centerKey,
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              for (int i = 0; i < beforeRows.length; i++) ...[
+                _MessageRow(
+                  key: ValueKey(beforeRows[i].message.id),
+                  columnId: state.id,
+                  row: beforeRows[i],
+                  showAuthor: showAuthorById[beforeRows[i].message.id]!,
+                ),
+                const SizedBox(height: 4),
+              ],
+              AdaptiveMarker(
+                isTop: true,
+                state: state.topLoading
+                    ? MarkerVisualState.loading
+                    : (state.topError != null
+                          ? MarkerVisualState.error
+                          : state.topMarker),
+                stitchCount: state.topStitchCount,
+                errorMessage: state.topError,
+                onLoadStitches: () => vm.loadStitchAbove(state.id),
+                onRetry: () => vm.loadStitchAbove(state.id),
+              ),
+            ]),
           ),
-          for (int i = state.rows.length - 1; i >= 0; i--) ...[
-            _MessageRow(
-              // Stable across rebuilds and reachable from outside the subtree,
-              // so a branch switch can measure this row before and after the
-              // rows around it are replaced.
-              key: _rowKey(state.rows[i].message.id),
+        ),
+        SliverToBoxAdapter(
+          key: _centerKey,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: _MessageRow(
+              key: ValueKey(centerRow.message.id),
               columnId: state.id,
-              row: state.rows[i],
-              // Rows are stored top-to-bottom (index 0 is topmost/oldest), but this
-              // ListView is `reverse: true` and iterates i downward, so "the row
-              // above" is index i - 1, not i + 1.
-              showAuthor:
-                  i == 0 ||
-                  _authorKey(state.rows[i].message) !=
-                      _authorKey(state.rows[i - 1].message),
-              onNavigateAnchored: _navigateAnchored,
+              row: centerRow,
+              showAuthor: showAuthorById[centerRow.message.id]!,
             ),
-            if (i > 0) const SizedBox(height: 4),
-          ],
-          AdaptiveMarker(
-            isTop: true,
-            state: state.topLoading
-                ? MarkerVisualState.loading
-                : (state.topError != null
-                      ? MarkerVisualState.error
-                      : state.topMarker),
-            stitchCount: state.topStitchCount,
-            errorMessage: state.topError,
-            onLoadStitches: () => vm.loadStitchAbove(state.id),
-            onRetry: () => vm.loadStitchAbove(state.id),
           ),
-        ],
-      ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 70),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              if (afterRows.isNotEmpty) const SizedBox(height: 4),
+              for (int i = 0; i < afterRows.length; i++) ...[
+                _MessageRow(
+                  key: ValueKey(afterRows[i].message.id),
+                  columnId: state.id,
+                  row: afterRows[i],
+                  showAuthor: showAuthorById[afterRows[i].message.id]!,
+                ),
+                if (i < afterRows.length - 1) const SizedBox(height: 4),
+              ],
+              AdaptiveMarker(
+                isTop: false,
+                state: state.bottomLoading
+                    ? MarkerVisualState.loading
+                    : (state.bottomError != null
+                          ? MarkerVisualState.error
+                          : state.bottomMarker),
+                stitchCount: state.bottomStitchCount,
+                errorMessage: state.bottomError,
+                onLoadStitches: () => vm.loadStitchBelow(state.id),
+                onRetry: () => vm.loadStitchBelow(state.id),
+              ),
+            ]),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -448,24 +413,13 @@ class _MessageListState extends State<_MessageList> {
 String _authorKey(Message message) =>
     message.authorId ?? _MessageRow._defaultAuthorLabel(message.role);
 
-/// Runs a branch switch while holding the row for `anchorMessageId` still on
-/// screen — see `_MessageListState._navigateAnchored`.
-typedef _AnchoredNav =
-    Future<void> Function(
-      String anchorMessageId,
-      Future<void> Function() action,
-    );
-
 class _MessageRow extends StatelessWidget {
   const _MessageRow({
     super.key,
     required this.columnId,
     required this.row,
     required this.showAuthor,
-    required this.onNavigateAnchored,
   });
-
-  final _AnchoredNav onNavigateAnchored;
 
   final String columnId;
   final MessageRowData row;
@@ -513,16 +467,15 @@ class _MessageRow extends StatelessWidget {
           (row.outgoingCurrentIndex + 1) >= row.outgoing!.replyOutgoing.length;
 
       // `anchorId` is the parent row above — the one row a sibling swap
-      // leaves untouched — so it doubles as the scroll anchor.
+      // leaves untouched, and exactly what `navigateOutgoing` re-anchors the
+      // column's persisted anchor to, so the column's `CustomScrollView`
+      // picks it up as the scroll anchor with no extra wiring needed here.
       leftNav = OutgoingNavArrow(
         icon: Icons.chevron_left,
         enabled: canPrev,
         loading: false,
         isStitch: prevIsStitch,
-        onPressed: () => onNavigateAnchored(
-          anchorId,
-          () => vm.navigateOutgoing(columnId, anchorId, forward: false),
-        ),
+        onPressed: () => vm.navigateOutgoing(columnId, anchorId, forward: false),
         tooltip: 'Previous',
       );
 
@@ -531,10 +484,7 @@ class _MessageRow extends StatelessWidget {
         enabled: canNext,
         loading: false,
         isStitch: nextIsStitch,
-        onPressed: () => onNavigateAnchored(
-          anchorId,
-          () => vm.navigateOutgoing(columnId, anchorId, forward: true),
-        ),
+        onPressed: () => vm.navigateOutgoing(columnId, anchorId, forward: true),
         tooltip: 'Next',
       );
     }
@@ -545,21 +495,17 @@ class _MessageRow extends StatelessWidget {
         if (row.incoming != null)
           // Mirror image of the sibling case: a parent swap rewrites the
           // context *above* this message and leaves the message itself in
-          // place, so this row is its own scroll anchor.
+          // place, and `navigateIncoming` re-anchors the column's persisted
+          // anchor to this message, so it's picked up as the scroll anchor
+          // automatically.
           IncomingNavigator(
             replyCount: row.incoming!.replyIncoming.length,
             stitchCount: row.incoming!.stitchedIncoming.length,
             currentIndex: row.incomingCurrentIndex,
-            onPrev: () => onNavigateAnchored(
-              row.message.id,
-              () =>
-                  vm.navigateIncoming(columnId, row.message.id, forward: false),
-            ),
-            onNext: () => onNavigateAnchored(
-              row.message.id,
-              () =>
-                  vm.navigateIncoming(columnId, row.message.id, forward: true),
-            ),
+            onPrev: () =>
+                vm.navigateIncoming(columnId, row.message.id, forward: false),
+            onNext: () =>
+                vm.navigateIncoming(columnId, row.message.id, forward: true),
           ),
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
