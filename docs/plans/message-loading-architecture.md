@@ -1,5 +1,8 @@
 # Message loading architecture: MessageStore, windowing, and bootstrap
 
+> **Superseded by `message-loading-plan.md`.** Kept for history of how the
+> `MessageStore`/edge-id-split idea emerged; the consolidated doc is current.
+
 ## Context
 
 `column-ui-impl-plan.md` §1 already designed windowed loading in real detail —
