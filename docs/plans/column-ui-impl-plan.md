@@ -1,5 +1,9 @@
 # Port multi-column thread UI + navigators into stitch-desktop
 
+> **§1/§1a/§1b (windowed loading) superseded by `message-loading-plan.md`.**
+> The rest of this doc (multi-column shell, navigators, bootstrap) still
+> applies.
+
 ## Context
 
 `stitch-desktop/docs/plans/message-tree-data-model.md` lays out a 5-component plan for a multi-column, branch-navigable chat UI. Components 1 (schema/repositories) and 2 (`BranchPathService`, fully unit-tested) are already built. Components 3–5 (multi-column shell, column thread view with navigators, filesystem mirror) are not started — the app's actual running UI (`lib/ui/chat/chat_view.dart` + `chat_viewmodel.dart`) is still a single-thread "hello world" chat screen that talks to the local Python WS bot and keeps messages in a plain in-memory list. **It never touches `AppDatabase`/`MessageRepository`/`ColumnRepository` at all** — nothing persisted by drift today came from a real conversation, only from the repository unit tests. So before any column UI can render anything real, the live chat flow has to start writing into SQLite.

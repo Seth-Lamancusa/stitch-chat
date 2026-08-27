@@ -1,5 +1,8 @@
 # Materialized vs. default-derived trajectory loading
 
+> **Superseded by `message-loading-plan.md`.** Kept for history of the
+> resume-vs-load split rationale; the consolidated doc is current.
+
 ## Context
 
 `column-ui-impl-plan.md` §1 introduced windowed loading (`BranchWindow`,
