@@ -14,13 +14,11 @@ To integrate a model (cloud or local), developers implement or utilize an existi
 
 Stitch utilizes a generic data model for tracking conversations and messages. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and support connections between them for reply chaining and context engineering. The fundamental data model is that of the message.
 
-There are two kinds of directed links between messages: **reply**-like and **stitch**-like. Reply links are only (optionally) generated on message creation, while stitch links may be arbitrarily added. Both may be followed for context curation. A linearly connected subset of messages acts as the rendered thread and context object.
-
-This enables two things: efficient, dynamic context management for token usage optimization or response quality, and iteration on prompts, models, and context windows as isolated variables. 
+There are two kinds of directed links between messages: **reply**-like and **stitch**-like. Reply links are only (optionally) generated on message creation, while stitch links may be arbitrarily added. Both may be followed for context curation. A linearly connected subset of messages acts as the rendered thread and context object. This enables two things: efficient, dynamic context management for token usage optimization or response quality, and iteration on prompts, models, and context windows as isolated variables. 
 
 Forking a thread enables you to use only the context up to a certain point in the conversation (specification, exploration, etc) but not subsequent messages. This is useful when a followup question or quick bug fix benefits your existing context window, but itself is irrelevant to subsequent work. Stitching the tail of a conversation another is a natural way to plug subagent work results like codebase exploration into your thread. Claude Code's Agent Skills frontmatter spec does this with its "fork" field; Stitching is a more flexible, general way of plugging part of one conversation into the context of another.
 
-You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side or programatically. We also version control all nested git repositories on the message node basis for comparing results between coding runtimes. 
+You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side or programatically. We also version control the `cwd` on the message node basis for comparing results between coding runtimes. 
 
 
 ### Adapter Contract
