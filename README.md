@@ -19,7 +19,7 @@ There are two kinds of directed links between messages: **reply**-like and **sti
 
 Forking a thread enables you to use only the context up to a certain point in the conversation (specification, exploration, etc) but not subsequent messages. This is useful when a followup question or quick bug fix benefits from your existing context window, but itself is irrelevant to subsequent work. Stitching the tail of a conversation to another is a natural way to plug subagent work results like codebase exploration into your thread. Claude Code's Agent Skills frontmatter spec does this with its "fork" field; Stitching is a more flexible, general way of plugging part of one conversation into the context of another.
 
-You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side visually, or programatically. Note, since agents execute in the live `cwd`, you are responsible for isolating your experimental environments. For scientific purposes, the Stitch data model assumes independence between invocation consequences, and that model responses capture experiment results completely.
+You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side visually, or programatically. Note, since agents execute in the live `cwd`, you are responsible for isolating your experimental environments. For scientific purposes, the Stitch data model assumes (and therefore does not enforce) independence between invocation consequences, and that model responses capture experiment results completely.
 
 
 ### Adapter Contract
@@ -66,10 +66,10 @@ The Python server provides a bot manifest from a `BotRegistry`, advertising capa
 
 #### Ownership
 
-* **Dart owns** — persistence (local and cloud, abstract repo implementations), environment lifecycle (materialization and teardown), snapshot creation, message identity, and the mapping from message nodes to environment state.
-* **Python bridge owns** — bot registry, adapter invocation, response normalization, process supervision, and `reply_to` validation.
+* **Dart owns** — persistence (local and cloud, abstract data repo implementations), message identity.
+* **Python bridge owns** — bot registry, adapter invocation, response normalization, process supervision, `reply_to` validation.
 * **Adapter owns** — Stitch message + context → runtime call, and runtime output → Stitch nodes.
-* **Runtime owns** — response generation and emission, model sandboxing, permissions, and capabilities.
+* **Runtime owns** — response generation and emission, model sandboxing, permissions, capabilities.
 
 #### How Adapters Partition Bots
 
