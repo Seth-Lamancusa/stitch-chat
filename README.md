@@ -10,15 +10,16 @@ Run with `flutter run` to develop.
 
 To integrate a model (cloud or local), developers implement or utilize an existing **adapter** (if one exists, the bot may simply be registered). An adapter plugs a model response runtime (which may support multiple bots, see below) into Stitch.
 
+
 ### Data Model
 
 Stitch utilizes a generic data model for tracking conversations and messages. Instead of centering the data model on the thread (a linear string of messages), we center the message object itself and support connections between them for reply chaining and context engineering. The fundamental data model is that of the message.
 
 There are two kinds of directed links between messages: **reply**-like and **stitch**-like. Reply links are only (optionally) generated on message creation, while stitch links may be arbitrarily added. Both may be followed for context curation. A linearly connected subset of messages acts as the rendered thread and context object. This enables two things: efficient, dynamic context management for token usage optimization or response quality, and iteration on prompts, models, and context windows as isolated variables. 
 
-Forking a thread enables you to use only the context up to a certain point in the conversation (specification, exploration, etc) but not subsequent messages. This is useful when a followup question or quick bug fix benefits your existing context window, but itself is irrelevant to subsequent work. Stitching the tail of a conversation another is a natural way to plug subagent work results like codebase exploration into your thread. Claude Code's Agent Skills frontmatter spec does this with its "fork" field; Stitching is a more flexible, general way of plugging part of one conversation into the context of another.
+Forking a thread enables you to use only the context up to a certain point in the conversation (specification, exploration, etc) but not subsequent messages. This is useful when a followup question or quick bug fix benefits from your existing context window, but itself is irrelevant to subsequent work. Stitching the tail of a conversation to another is a natural way to plug subagent work results like codebase exploration into your thread. Claude Code's Agent Skills frontmatter spec does this with its "fork" field; Stitching is a more flexible, general way of plugging part of one conversation into the context of another.
 
-You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side or programatically. We also version control the `cwd` on the message node basis for comparing results between coding runtimes. 
+You may reply to the same message multiple times or prompt multiple responses to a message to fork a thread (multiple bots can be tagged on a single message). Vary the message content, the preceding context, or the model you invoke independently, then compare responses side by side visually, or programatically. Note, since agents execute in the live `cwd`, you are responsible for isolating your experimental environments. For scientific purposes, the Stitch data model assumes independence between invocation consequences, and that model responses capture experiment results completely.
 
 
 ### Adapter Contract
@@ -31,8 +32,9 @@ Each adapter implementation may accept the following inputs:
    - `@claude-code:sonnet-5.6 ...` → Claude Code runtime + model (required)
    - `@cursor:gpt-sol-5.6` → Cursor runtime + model
    - `@chatgpt:gpt-sol-5.6` → OpenAI runtime, OpenAI endpoint + model^
-* A cwd (where applicable)
-* One or more MCP server URLs (+ auth)
+* Metadata:
+   - A cwd (where applicable)
+   - One or more MCP server URLs (+ auth)
 
 And to emit:
 
@@ -62,7 +64,6 @@ A `runtime` is anything an adapter can invoke to produce model or agent output. 
 
 The Python server provides a bot manifest from a `BotRegistry`, advertising capabilities and availability. Dart doesn't know about adapters or runtimes.
 
-
 #### Ownership
 
 * **Dart owns** — persistence (local and cloud, abstract repo implementations), environment lifecycle (materialization and teardown), snapshot creation, message identity, and the mapping from message nodes to environment state.
@@ -90,16 +91,6 @@ Each layer (Dart, bridge, adapter, runtime) communicates with its neighbors via 
 
 The adapter and runtime together decide *how to respond* — the rest is product, transport, validation, and enforcement. 
 
-#### Filesystem Snapshots
-
-> A filesystem-backed invocation executes against a materialized environment derived from the parent message’s environment state. Stitch snapshots resulting state and associates it with emitted message nodes.
-
-Stitch versions your working directory recursively (up to a practical size constraint) when you pass it to a model as your `cwd` (generally optional) for the purposes of rollback and branch comparison. We do not sandbox the environment based on the `cwd`. Model sandboxing and permissioning (confinement) belongs to the runtime. Snapshot refs are associated directly with message nodes - "what the cwd looked like at this message". One nuance here: behavior can exceed cwd scope, via shell commands, shared config modifications, external tooling, etc. The snapshot is technically best-effort and practical. Materialized directories are ephemeral realizations of persistent snapshot state for model invocation context. Snapshots are authoritative; working directories are caches. Simplifies cleanup, lazy materialization, branching, and rematerialization. The user's actual "working directory" they see on their filesystem and test on is independent of either of these and automatically fast-forwarded to to the most recent response with UI on the node for clarity. 
-
-Snapshots use Git’s object database as a content-addressed store, but Stitch does not use Git as a working-copy manager. Stitch walks the environment itself, hashes file contents, constructs tree objects, and records the resulting commit/tree identifier. This avoids `.gitignore`, nested-repository gitlinks, and mutation of the user’s branch or staging area. Untracked files are generally included subject to explicit space-policy exclusions; nested repositories are treated as ordinary filesystem content for snapshot purposes; actual repository HEADs are recorded separately as metadata/indexing; deduplication comes from Git object identity.
-
-Materialization and snapshotting are lazy and content-addressed. Concurrent invocations require separate working directories. Large generated trees remain the principal practical cost; exclusions such as `node_modules`, `.venv`, and build outputs are therefore a storage policy rather than `.gitignore` semantics. We accept non-trivial snapshot materialization and persistent timing as negligible next to model response times, and the practical size constraint that caps this functionality reflects that principle. 
-
 #### Cloud-based Interaction
 - Bridge handles responses in-process with arbitrarily finite response time; human responses aren't instantaneous, and conceptually neither are model responses.
 - Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). TBD: good UI representations for cloud vs. locally _registered_, plus common cross-cutting cases (cloud-backed response generation, local response gen + external tooling, fully local, simply human, etc) and a coherent, comprehensive definition on the user level (to be advertised by the bot registry for bots registered locally, or otherwise inferred from cloud user attributes including `is-bot`).
@@ -113,10 +104,12 @@ Materialization and snapshotting are lazy and content-addressed. Concurrent invo
 - Every notification gets a copy button for free (paste error text into a bug report without transcribing).
 - `NotificationOverlay` renders whatever `NotificationService` holds, wraps app root — new screens/ViewModels just inject the service, no bespoke error UI.
 
+
 ### Tips
 - Prefer new files for new logic/classes over appending to existing files.
 - Detailed docs live in `./docs`.
 - Make mouse cursor shape responsive to button hovers (`SystemMouseCursors.click`) generally, not case-by-case.
+
 
 ### Resources
 - [Best Practices](./docs/best-practices.md)
