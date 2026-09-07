@@ -635,7 +635,7 @@ class _Composer extends StatelessWidget {
                     controller: controller,
                     focusNode: focusNode,
                     decoration: const InputDecoration(
-                      hintText: 'Say something...',
+                      hintText: 'Say something… (@chatgpt to ask)',
                       border: InputBorder.none,
                       isDense: true,
                       contentPadding: EdgeInsets.symmetric(

@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../core/logging/stitch_env.dart';
+import '../core/logging/stitch_log.dart';
+
 /// Port the local Python server listens on (must match python-server/protocol.py).
 const _serverPort = 8765;
 
@@ -13,21 +16,24 @@ const _serverPort = 8765;
 class PythonProcessService {
   Process? _process;
 
-  Future<void> start() async {
+  Future<void> start({StitchEnv? env}) async {
     // A previous run may have left the server orphaned (e.g. app killed
     // without a clean shutdown), which would make the new process fail to
     // bind the port. Clear it out before starting.
     await _killExistingOnPort(_serverPort);
 
-    final projectRoot = Directory.current.path;
+    final stitchEnv = env ?? StitchEnv.load();
+    final projectRoot = stitchEnv.projectRoot;
     final serverDir = Directory('$projectRoot/python-server');
     final pythonBin = '${serverDir.path}/venv/bin/python';
-    final envFile = File('$projectRoot/.env');
 
-    final environment = <String, String>{
-      ...Platform.environment,
-      ..._parseEnvFile(envFile),
-    };
+    await Directory(stitchEnv.logDir).create(recursive: true);
+
+    final environment = stitchEnv.pythonProcessEnvironment();
+    StitchLog.hop(
+      'dart.process',
+      'start python bin=$pythonBin log_level=${stitchEnv.logLevel.envName} log_dir=${stitchEnv.logDir}',
+    );
 
     _process = await Process.start(
       pythonBin,
@@ -36,30 +42,16 @@ class PythonProcessService {
       environment: environment,
     );
 
-    _process!.stdout
-        .transform(SystemEncoding().decoder)
-        .listen((line) => stdout.write('[python] $line'));
-    _process!.stderr
-        .transform(SystemEncoding().decoder)
-        .listen((line) => stderr.write('[python] $line'));
-  }
-
-  Map<String, String> _parseEnvFile(File file) {
-    if (!file.existsSync()) return {};
-    final result = <String, String>{};
-    for (final line in file.readAsLinesSync()) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
-      final separatorIndex = trimmed.indexOf('=');
-      if (separatorIndex == -1) continue;
-      final key = trimmed.substring(0, separatorIndex).trim();
-      final value = trimmed.substring(separatorIndex + 1).trim();
-      result[key] = value;
-    }
-    return result;
+    _process!.stdout.transform(SystemEncoding().decoder).listen((line) {
+      stdout.write('[python] $line');
+    });
+    _process!.stderr.transform(SystemEncoding().decoder).listen((line) {
+      stderr.write('[python] $line');
+    });
   }
 
   void stop() {
+    StitchLog.hop('dart.process', 'stop python bridge');
     _process?.kill(ProcessSignal.sigterm);
     _process = null;
   }
