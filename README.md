@@ -104,6 +104,37 @@ The adapter and runtime together decide *how to respond* — the rest is product
 - Every notification gets a copy button for free (paste error text into a bug report without transcribing).
 - `NotificationOverlay` renders whatever `NotificationService` holds, wraps app root — new screens/ViewModels just inject the service, no bespoke error UI.
 
+#### Logging
+Dart and the Python bridge share one log level and write sibling rotating files under the project `logs/` directory (gitignored).
+
+| Knob | Where | Default |
+| --- | --- | --- |
+| `STITCH_LOG_LEVEL` | `.env` or process env | `DEBUG` |
+| `STITCH_LOG_DIR` | `.env` or process env | `<projectRoot>/logs` |
+
+Levels: `TRACE` \| `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. Flutter loads `.env` at startup and passes both knobs into the Python subprocess, so one setting covers both processes.
+
+| File | Writer | Rotation |
+| --- | --- | --- |
+| `logs/dart.log` | Dart `StitchLog` | 10 MB × 5 (`dart.log`, `dart.log.1` …) |
+| `logs/python.log` | Python [loguru](https://github.com/Delgan/loguru) | 10 MB × 5 |
+
+**Pipeline breadcrumbs.** Bot invocations log a greppable `hop=<stage>` line at each major boundary. Stages follow the architecture stack:
+
+```
+dart.column → dart.bridge → dart.ws → py.ws → py.server → py.adapter → py.runtime
+```
+
+Direction is in the message (`→py`, `←py`, `→runtime`, `←runtime`). Example scan:
+
+```bash
+rg 'hop=' logs/dart.log logs/python.log
+# or follow a single trigger id:
+rg 'trigger=<message-id>|parent=<message-id>' logs/
+```
+
+When adding a new adapter or hop, log at `DEBUG` with `hop=<stage> | …` (Dart: `StitchLog.hop`; Python: `logging_setup.hop`) so traces stay scannable across languages.
+
 
 ### Tips
 - Prefer new files for new logic/classes over appending to existing files.

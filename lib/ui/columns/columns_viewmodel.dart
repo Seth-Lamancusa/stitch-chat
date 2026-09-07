@@ -1,11 +1,16 @@
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/logging/stitch_log.dart';
+import '../../core/notifications/notification_service.dart';
 import '../../data/models/message.dart';
 import '../../data/repositories/column_repository.dart';
 import '../../data/repositories/message_repository.dart';
+import '../../data/services/bot_bridge_service.dart';
 import '../../data/services/local_identity_service.dart';
+import '../../domain/bot_mention.dart';
 import '../../domain/branch_path_service.dart';
+import '../../domain/context_chain.dart';
 import '../core/adaptive_marker.dart';
 import 'column_ui_state.dart';
 
@@ -21,13 +26,28 @@ import 'column_ui_state.dart';
 /// resolves the whole branch in one walk. For the seeded test threads this
 /// app ships with, that's an acceptable stand-in: it exercises the same
 /// navigator/marker/persistence logic end-to-end, just without pagination.
+///
+/// When [botBridge] is non-null and the send content tags a known local bot
+/// (e.g. `@chatgpt`), the visible branch through the reply target is sent
+/// to the Python bridge; the reply is persisted as a normal message under
+/// the trigger. Same path for every column — no special-cased column id.
 class ColumnsViewModel extends ChangeNotifier {
-  ColumnsViewModel(this._messages, this._columns, this._branchPathService, this._identity);
+  ColumnsViewModel(
+    this._messages,
+    this._columns,
+    this._branchPathService,
+    this._identity, {
+    BotBridgeService? botBridge,
+    NotificationService? notifications,
+  })  : _botBridge = botBridge,
+        _notifications = notifications;
 
   final MessageRepository _messages;
   final ColumnRepository _columns;
   final BranchPathService _branchPathService;
   final LocalIdentityService _identity;
+  final BotBridgeService? _botBridge;
+  final NotificationService? _notifications;
   static const _uuid = Uuid();
 
   final List<ColumnUiState> _states = [];
@@ -201,6 +221,18 @@ class ColumnsViewModel extends ChangeNotifier {
     if (content.trim().isEmpty) return;
     final state = _stateFor(columnId);
     final parentId = state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+    final visibleBranch = state.rows.map((row) => row.message).toList(growable: false);
+    final contextMessages = contextThroughReplyTarget(
+      visibleBranch,
+      replyTargetId: parentId,
+    );
+    final mentions = parseBotMentions(content);
+
+    StitchLog.hop(
+      'dart.column',
+      'send column=$columnId reply_to=$parentId visible=${visibleBranch.length} context=${contextMessages.length} mentions=${mentions.map((m) => m.botId).join(",")}',
+    );
+
     final newMessage = Message(
       id: _uuid.v4(),
       role: MessageRole.user,
@@ -215,9 +247,74 @@ class ColumnsViewModel extends ChangeNotifier {
       await _columns.setBranchPointer(columnId, parentId, newMessage.id);
     }
 
+    for (final mention in mentions) {
+      await _messages.addRecipientEdge(
+        newMessage.id,
+        mention.botId,
+        RecipientKind.localBot,
+      );
+    }
+
     state.replyingToMessageId = null;
     await _columns.updateColumnAnchor(columnId, newMessage.id);
     _anchors[columnId] = newMessage.id;
+    await _refresh(columnId);
+    notifyListeners();
+    StitchLog.hop('dart.column', 'persisted trigger id=${newMessage.id} parent=$parentId');
+
+    final bridge = _botBridge;
+    if (bridge == null || mentions.isEmpty) {
+      StitchLog.hop('dart.column', 'no bot dispatch bridge=${bridge != null} mentions=${mentions.length}');
+      return;
+    }
+
+    final contextNodes = contextMessages.map(messageToContextNode).toList(growable: false);
+    for (final mention in mentions) {
+      StitchLog.hop(
+        'dart.column',
+        '→bridge bot=${mention.botId} trigger=${newMessage.id} context=${contextNodes.length}',
+      );
+      try {
+        final reply = await bridge.invoke(
+          botId: mention.botId,
+          triggerMessageId: newMessage.id,
+          content: content,
+          context: contextNodes,
+        );
+        await _persistBotReply(columnId, triggerId: newMessage.id, reply: reply);
+        StitchLog.hop(
+          'dart.column',
+          'persisted bot reply id=${reply.messageId} parent=${newMessage.id} chars=${reply.content.length}',
+        );
+      } catch (e, st) {
+        StitchLog.error(
+          'column=$columnId bot=${mention.botId} failed',
+          tag: 'dart.column',
+          error: e,
+          stackTrace: st,
+        );
+        _notifications?.showError('Bot ${mention.botId} failed: $e');
+      }
+    }
+  }
+
+  Future<void> _persistBotReply(
+    String columnId, {
+    required String triggerId,
+    required BotBridgeReply reply,
+  }) async {
+    final botMessage = Message(
+      id: reply.messageId,
+      role: MessageRole.localBot,
+      authorId: reply.botId,
+      content: reply.content,
+      createdAt: DateTime.now().toUtc(),
+    );
+    await _messages.saveMessage(botMessage);
+    await _messages.addReplyEdge(triggerId, botMessage.id);
+    await _columns.setBranchPointer(columnId, triggerId, botMessage.id);
+    await _columns.updateColumnAnchor(columnId, botMessage.id);
+    _anchors[columnId] = botMessage.id;
     await _refresh(columnId);
     notifyListeners();
   }
