@@ -74,6 +74,9 @@ class FakeMessageRepository implements MessageRepository {
   Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind) async {}
 
   @override
+  Future<List<RecipientRef>> getRecipients(String messageId) async => const [];
+
+  @override
   Future<void> deleteMessage(String id) async => _messages.remove(id);
 }
 

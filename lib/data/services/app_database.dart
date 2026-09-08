@@ -77,6 +77,9 @@ class Columns extends Table {
   TextColumn get anchorMessageId => text().references(Messages, #id).nullable()();
   RealColumn get width => real().nullable()(); // null = flexible
   RealColumn get scrollOffset => real().nullable()(); // null = not yet scrolled / no saved position
+  /// Working-directory tag for adapters that bind a cwd (e.g. Cursor local).
+  /// Not message state — passed on each bot invoke for this column.
+  TextColumn get cwd => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -120,7 +123,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(

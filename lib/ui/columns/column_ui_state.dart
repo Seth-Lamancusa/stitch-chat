@@ -68,12 +68,26 @@ class ColumnUiState {
   /// the default target — the current bottom row — applies instead.
   String? replyingToMessageId;
 
+  /// Working-directory tag for bot invokes from this column. Null/empty =
+  /// unset. Persisted via [ColumnsViewModel.updateColumnCwd].
+  String? cwd;
+
+  /// Bots in the prospective/authoritative recipient set that need a cwd
+  /// while this column has none. Drives the composer banner above the
+  /// reply box ([cwdWarningPhase]).
+  List<String> cwdWarningBotIds = const [];
+
+  /// [CwdWarningPhase.advisory] while composing; [CwdWarningPhase.sent]
+  /// right after send (then fades to [CwdWarningPhase.none]).
+  CwdWarningPhase cwdWarningPhase = CwdWarningPhase.none;
+
   ColumnUiState({
     required this.id,
     this.width,
     this.isActive = false,
     this.rows = const [],
     this.initialScrollOffset,
+    this.cwd,
     this.topMarker = MarkerVisualState.end,
     this.topStitchCount = 0,
     this.topLoading = false,
@@ -84,4 +98,11 @@ class ColumnUiState {
     this.bottomError,
     this.replyingToMessageId,
   });
+}
+
+/// Composer banner for bots that require a column cwd.
+enum CwdWarningPhase {
+  none,
+  advisory,
+  sent,
 }

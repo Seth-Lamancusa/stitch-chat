@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
@@ -8,7 +10,7 @@ import '../../data/repositories/column_repository.dart';
 import '../../data/repositories/message_repository.dart';
 import '../../data/services/bot_bridge_service.dart';
 import '../../data/services/local_identity_service.dart';
-import '../../domain/bot_mention.dart';
+import '../../domain/bot_registry.dart';
 import '../../domain/branch_path_service.dart';
 import '../../domain/context_chain.dart';
 import '../core/adaptive_marker.dart';
@@ -49,9 +51,12 @@ class ColumnsViewModel extends ChangeNotifier {
   final BotBridgeService? _botBridge;
   final NotificationService? _notifications;
   static const _uuid = Uuid();
+  static const _cwdWarningFadeDelay = Duration(seconds: 4);
 
   final List<ColumnUiState> _states = [];
   final Map<String, String?> _anchors = {};
+  final Map<String, String> _composerDrafts = {};
+  final Map<String, Timer> _cwdWarningFadeTimers = {};
 
   List<ColumnUiState> get columns => List.unmodifiable(_states);
 
@@ -65,7 +70,12 @@ class ColumnsViewModel extends ChangeNotifier {
     final metas = await _columns.getColumns();
     for (final meta in metas) {
       _anchors[meta.id] = meta.anchorMessageId;
-      _states.add(ColumnUiState(id: meta.id, width: meta.width, initialScrollOffset: meta.scrollOffset));
+      _states.add(ColumnUiState(
+        id: meta.id,
+        width: meta.width,
+        initialScrollOffset: meta.scrollOffset,
+        cwd: meta.cwd,
+      ));
     }
     if (_states.isNotEmpty) _states.first.isActive = true;
     for (final state in _states) {
@@ -80,7 +90,7 @@ class ColumnsViewModel extends ChangeNotifier {
     for (final state in _states) {
       state.isActive = false;
     }
-    _states.add(ColumnUiState(id: meta.id, width: meta.width, isActive: true));
+    _states.add(ColumnUiState(id: meta.id, width: meta.width, isActive: true, cwd: meta.cwd));
     notifyListeners();
     await _refresh(meta.id);
     notifyListeners();
@@ -118,6 +128,49 @@ class ColumnsViewModel extends ChangeNotifier {
   /// would rebuild the whole column tree for nothing.
   Future<void> updateColumnScrollOffset(String id, double? scrollOffset) {
     return _columns.updateColumnScrollOffset(id, scrollOffset);
+  }
+
+  /// Persists the column's working-directory tag and keeps [ColumnUiState.cwd]
+  /// in sync. Empty / whitespace clears the tag (stored as null).
+  Future<void> updateColumnCwd(String id, String? cwd) async {
+    final normalized = (cwd == null || cwd.trim().isEmpty) ? null : cwd.trim();
+    await _columns.updateColumnCwd(id, normalized);
+    _stateFor(id).cwd = normalized;
+    notifyListeners();
+    await refreshCwdWarning(id);
+  }
+
+  /// Called as the composer draft changes so the cwd advisory can track
+  /// prospective local-bot recipients (mentions + inherited).
+  Future<void> onComposerDraftChanged(String columnId, String draft) {
+    _composerDrafts[columnId] = draft;
+    return refreshCwdWarning(columnId);
+  }
+
+  /// Recomputes the advisory banner above the reply box. No-ops while a
+  /// post-send confirmation is still showing.
+  Future<void> refreshCwdWarning(String columnId) async {
+    final state = _stateFor(columnId);
+    if (state.cwdWarningPhase == CwdWarningPhase.sent) return;
+
+    final cwdOk = state.cwd != null && state.cwd!.isNotEmpty;
+    if (cwdOk) {
+      _clearCwdWarning(state);
+      notifyListeners();
+      return;
+    }
+
+    final bots = await _botsNeedingCwd(
+      columnId,
+      _composerDrafts[columnId] ?? '',
+    );
+    if (bots.isEmpty) {
+      _clearCwdWarning(state);
+    } else {
+      state.cwdWarningBotIds = List.unmodifiable(bots);
+      state.cwdWarningPhase = CwdWarningPhase.advisory;
+    }
+    notifyListeners();
   }
 
   /// Re-derives the column's branch from [parentId] itself rather than the
@@ -202,6 +255,7 @@ class ColumnsViewModel extends ChangeNotifier {
     }
     _stateFor(columnId).replyingToMessageId = messageId;
     notifyListeners();
+    unawaited(refreshCwdWarning(columnId));
   }
 
   /// Sends [content] as a reply under [columnId]'s pending reply target
@@ -226,7 +280,7 @@ class ColumnsViewModel extends ChangeNotifier {
       visibleBranch,
       replyTargetId: parentId,
     );
-    final mentions = parseBotMentions(content);
+    final mentions = (_botBridge?.registry ?? const BotRegistry.empty()).parseMentions(content);
 
     StitchLog.hop(
       'dart.column',
@@ -247,6 +301,37 @@ class ColumnsViewModel extends ChangeNotifier {
       await _columns.setBranchPointer(columnId, parentId, newMessage.id);
     }
 
+    // A reply inherits its parent's addressees (author + parent's own
+    // recipients) so the whole thread stays addressed without requiring an
+    // explicit @mention for everyone already in it — mirrors
+    // stitch-frontend's syncReplySettings, minus its notify/ancestor-cascade
+    // semantics, which this app doesn't model.
+    final inherited = <String, RecipientKind>{};
+    if (parentId != null) {
+      Message? parentMessage;
+      for (final row in state.rows) {
+        if (row.message.id == parentId) {
+          parentMessage = row.message;
+          break;
+        }
+      }
+      parentMessage ??= await _messages.getMessage(parentId);
+
+      final parentAuthorId = parentMessage?.authorId;
+      if (parentAuthorId != null && parentAuthorId != _identity.currentUserId) {
+        inherited[parentAuthorId] =
+            parentMessage!.role == MessageRole.localBot ? RecipientKind.localBot : RecipientKind.cloudUser;
+      }
+      for (final recipient in await _messages.getRecipients(parentId)) {
+        if (recipient.recipientId != _identity.currentUserId) {
+          inherited[recipient.recipientId] = recipient.kind;
+        }
+      }
+      for (final entry in inherited.entries) {
+        await _messages.addRecipientEdge(newMessage.id, entry.key, entry.value);
+      }
+    }
+
     for (final mention in mentions) {
       await _messages.addRecipientEdge(
         newMessage.id,
@@ -262,25 +347,58 @@ class ColumnsViewModel extends ChangeNotifier {
     notifyListeners();
     StitchLog.hop('dart.column', 'persisted trigger id=${newMessage.id} parent=$parentId');
 
+    // Dispatch is driven by the message's authoritative recipient set, not
+    // by re-parsing the text — same principle as stitch-frontend (recipients
+    // are the source of truth for who gets notified, not the literal
+    // @mention string). This picks up bots inherited as recipients (e.g. the
+    // parent message's bot author) even when this reply doesn't retype
+    // "@bot".
+    final botRecipientIds = <String>{
+      ...mentions.map((m) => m.botId),
+      for (final entry in inherited.entries)
+        if (entry.value == RecipientKind.localBot) entry.key,
+    };
+
     final bridge = _botBridge;
-    if (bridge == null || mentions.isEmpty) {
-      StitchLog.hop('dart.column', 'no bot dispatch bridge=${bridge != null} mentions=${mentions.length}');
+    if (bridge == null || botRecipientIds.isEmpty) {
+      StitchLog.hop('dart.column', 'no bot dispatch bridge=${bridge != null} recipients=${botRecipientIds.length}');
       return;
     }
 
-    final contextNodes = contextMessages.map(messageToContextNode).toList(growable: false);
-    for (final mention in mentions) {
+    final contextWindow = contextWindowIncludingTrigger(contextMessages, newMessage);
+    final contextNodes = contextWindow.map(messageToContextNode).toList(growable: false);
+    final cwd = state.cwd;
+    final cwdMissing = cwd == null || cwd.isEmpty;
+    final skippedForCwd = [
+      for (final botId in botRecipientIds)
+        if (cwdMissing && bridge.registry.requiresCwd(botId)) botId,
+    ];
+    if (skippedForCwd.isNotEmpty) {
+      _showCwdSentWarning(state, skippedForCwd);
+    } else {
+      _composerDrafts[columnId] = '';
+      unawaited(refreshCwdWarning(columnId));
+    }
+
+    for (final botId in botRecipientIds) {
       StitchLog.hop(
         'dart.column',
-        '→bridge bot=${mention.botId} trigger=${newMessage.id} context=${contextNodes.length}',
+        '→bridge bot=$botId trigger=${newMessage.id} cwd=${cwd ?? "-"} context=${contextNodes.length}',
       );
       try {
         final reply = await bridge.invoke(
-          botId: mention.botId,
+          botId: botId,
           triggerMessageId: newMessage.id,
-          content: content,
           context: contextNodes,
+          cwd: cwd,
         );
+        if (reply.skipped) {
+          StitchLog.hop(
+            'dart.column',
+            'bridge skipped bot=$botId reason=${reply.skipReason}',
+          );
+          continue;
+        }
         await _persistBotReply(columnId, triggerId: newMessage.id, reply: reply);
         StitchLog.hop(
           'dart.column',
@@ -288,14 +406,81 @@ class ColumnsViewModel extends ChangeNotifier {
         );
       } catch (e, st) {
         StitchLog.error(
-          'column=$columnId bot=${mention.botId} failed',
+          'column=$columnId bot=$botId failed',
           tag: 'dart.column',
           error: e,
           stackTrace: st,
         );
-        _notifications?.showError('Bot ${mention.botId} failed: $e');
+        _notifications?.showError('Bot $botId failed: $e');
       }
     }
+  }
+
+  Future<List<String>> _botsNeedingCwd(String columnId, String draft) async {
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    final state = _stateFor(columnId);
+    final parentId =
+        state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+
+    final botIds = <String>{
+      ...registry.parseMentions(draft).map((m) => m.botId),
+    };
+
+    if (parentId != null) {
+      Message? parentMessage;
+      for (final row in state.rows) {
+        if (row.message.id == parentId) {
+          parentMessage = row.message;
+          break;
+        }
+      }
+      parentMessage ??= await _messages.getMessage(parentId);
+      final parentAuthorId = parentMessage?.authorId;
+      if (parentAuthorId != null &&
+          parentAuthorId != _identity.currentUserId &&
+          parentMessage?.role == MessageRole.localBot) {
+        botIds.add(parentAuthorId);
+      }
+      for (final recipient in await _messages.getRecipients(parentId)) {
+        if (recipient.kind == RecipientKind.localBot &&
+            recipient.recipientId != _identity.currentUserId) {
+          botIds.add(recipient.recipientId);
+        }
+      }
+    }
+
+    return [
+      for (final botId in botIds)
+        if (registry.requiresCwd(botId)) botId,
+    ];
+  }
+
+  void _clearCwdWarning(ColumnUiState state) {
+    state.cwdWarningBotIds = const [];
+    state.cwdWarningPhase = CwdWarningPhase.none;
+  }
+
+  void _showCwdSentWarning(ColumnUiState state, List<String> bots) {
+    _cwdWarningFadeTimers[state.id]?.cancel();
+    state.cwdWarningBotIds = List.unmodifiable(bots);
+    state.cwdWarningPhase = CwdWarningPhase.sent;
+    _composerDrafts[state.id] = '';
+    notifyListeners();
+    _cwdWarningFadeTimers[state.id] = Timer(_cwdWarningFadeDelay, () {
+      if (!_states.any((s) => identical(s, state))) return;
+      if (state.cwdWarningPhase != CwdWarningPhase.sent) return;
+      _clearCwdWarning(state);
+      notifyListeners();
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final timer in _cwdWarningFadeTimers.values) {
+      timer.cancel();
+    }
+    _cwdWarningFadeTimers.clear();
+    super.dispose();
   }
 
   Future<void> _persistBotReply(

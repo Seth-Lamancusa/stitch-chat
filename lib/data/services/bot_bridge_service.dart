@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../core/logging/stitch_log.dart';
+import '../../domain/bot_registry.dart';
 import 'stitch_ws_client.dart';
 
 /// One completed bot reply from the Python bridge (singular-part for now).
@@ -11,6 +12,8 @@ class BotBridgeReply {
     required this.botId,
     required this.content,
     this.usage,
+    this.skipped = false,
+    this.skipReason,
   });
 
   final String messageId;
@@ -18,12 +21,17 @@ class BotBridgeReply {
   final String botId;
   final String content;
   final Map<String, dynamic>? usage;
+
+  /// Bridge declined to run the adapter (e.g. missing cwd). Not a failure.
+  final bool skipped;
+  final String? skipReason;
 }
 
 /// Thin facade over [StitchWsClient]: connect, invoke a bot with Stitch
-/// context, correlate start/end/error by parent (trigger) message id.
+/// context, correlate start/end/error/skip by parent (trigger) message id.
 ///
-/// No Cursor session cache, no cwd — Completions-first path only.
+/// Session affinity (fingerprint → opaque handle) stays adapter-private on
+/// the Python side. [cwd] is a column tag forwarded on each invoke.
 class BotBridgeService {
   BotBridgeService(this._client);
 
@@ -31,25 +39,39 @@ class BotBridgeService {
   StreamSubscription<Map<String, dynamic>>? _subscription;
   final _pending = <String, _PendingInvocation>{};
   bool _connected = false;
+  BotRegistry _registry = const BotRegistry.empty();
 
   bool get isConnected => _connected;
+
+  /// Tag -> bot id lookup derived from the `bots` field of the server's
+  /// `ready` envelope. Empty until [connect] completes.
+  BotRegistry get registry => _registry;
 
   Future<void> connect() async {
     if (_connected) return;
     StitchLog.hop('dart.bridge', 'connect');
-    await _client.connect();
+    // Subscribe before connecting: the `ready` envelope (which carries the
+    // bot registry) arrives on `_client.envelopes` as soon as the client's
+    // own connect() completes, and that broadcast stream doesn't replay past
+    // events to late listeners.
     _subscription = _client.envelopes.listen(_onEnvelope);
+    await _client.connect();
     _connected = true;
     StitchLog.hop('dart.bridge', 'ready');
   }
 
   /// Invokes [botId] with [triggerMessageId] as the parent of emitted
-  /// replies. [context] is already sliced through the reply target.
+  /// replies. [context] is the full context window including the trigger
+  /// as its last node. [cwd] is the invoking column's working-directory
+  /// tag (nullable).
+  ///
+  /// A skipped invoke (e.g. `requires_cwd`) returns [BotBridgeReply.skipped]
+  /// rather than throwing.
   Future<BotBridgeReply> invoke({
     required String botId,
     required String triggerMessageId,
-    required String content,
     required List<Map<String, dynamic>> context,
+    String? cwd,
   }) async {
     if (!_connected) {
       throw StateError('BotBridgeService.connect() must complete before invoke');
@@ -63,22 +85,29 @@ class BotBridgeService {
 
     StitchLog.hop(
       'dart.bridge',
-      '→py invoke bot=$botId trigger=$triggerMessageId context=${context.length} content_len=${content.length}',
+      '→py invoke bot=$botId trigger=$triggerMessageId cwd=${cwd ?? "-"} context=${context.length}',
     );
     _client.send({
       'type': 'user_message',
       'message_id': triggerMessageId,
       'bot_id': botId,
-      'content': content,
       'context': context,
+      if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
     });
 
     try {
       final reply = await pending.completer.future;
-      StitchLog.hop(
-        'dart.bridge',
-        '←py reply bot=$botId trigger=$triggerMessageId reply_id=${reply.messageId} chars=${reply.content.length} usage=${reply.usage}',
-      );
+      if (reply.skipped) {
+        StitchLog.hop(
+          'dart.bridge',
+          '←py skipped bot=$botId trigger=$triggerMessageId reason=${reply.skipReason}',
+        );
+      } else {
+        StitchLog.hop(
+          'dart.bridge',
+          '←py reply bot=$botId trigger=$triggerMessageId reply_id=${reply.messageId} chars=${reply.content.length} usage=${reply.usage}',
+        );
+      }
       return reply;
     } catch (e, st) {
       StitchLog.error(
@@ -97,7 +126,11 @@ class BotBridgeService {
     final type = envelope['type'] as String?;
     final parentId = envelope['parent_message_id'] as String?;
     if (type == 'ready') {
-      StitchLog.hop('dart.bridge', '←py ready');
+      final bots = envelope['bots'];
+      if (bots is List) {
+        _registry = BotRegistry.fromWire(bots);
+      }
+      StitchLog.hop('dart.bridge', '←py ready bots=${bots is List ? bots.length : 0}');
       return;
     }
     if (parentId == null) return;
@@ -130,6 +163,23 @@ class BotBridgeService {
             botId: (envelope['bot_id'] as String?) ?? pending.botId,
             content: (envelope['content'] as String?) ?? '',
             usage: envelope['usage'] as Map<String, dynamic>?,
+          ),
+        );
+      case 'invoke_skipped':
+        if (pending.completer.isCompleted) return;
+        final reason = envelope['reason'] as String? ?? 'skipped';
+        StitchLog.hop(
+          'dart.bridge',
+          '←py invoke_skipped parent=$parentId reason=$reason',
+        );
+        pending.completer.complete(
+          BotBridgeReply(
+            messageId: (envelope['message_id'] as String?) ?? 'skipped',
+            parentMessageId: parentId,
+            botId: (envelope['bot_id'] as String?) ?? pending.botId,
+            content: '',
+            skipped: true,
+            skipReason: reason,
           ),
         );
       case 'error':

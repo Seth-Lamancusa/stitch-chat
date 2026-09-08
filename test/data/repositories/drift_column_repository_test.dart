@@ -60,6 +60,17 @@ void main() {
     expect(await columnRepo.getColumns(), isEmpty);
   });
 
+  test('updateColumnCwd persists and empty clears', () async {
+    final created = await columnRepo.createColumn(anchorMessageId: 'root');
+    expect(created.cwd, isNull);
+
+    await columnRepo.updateColumnCwd(created.id, ' /tmp/work ');
+    expect((await columnRepo.getColumns()).single.cwd, '/tmp/work');
+
+    await columnRepo.updateColumnCwd(created.id, '   ');
+    expect((await columnRepo.getColumns()).single.cwd, isNull);
+  });
+
   test('setBranchPointer is queryable from both directions', () async {
     final column = await columnRepo.createColumn(anchorMessageId: 'root');
 
