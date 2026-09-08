@@ -47,6 +47,9 @@ class StitchApiMessageRepository implements MessageRepository {
       _unimplemented();
 
   @override
+  Future<List<RecipientRef>> getRecipients(String messageId) => _unimplemented();
+
+  @override
   Future<void> deleteMessage(String id) => _unimplemented();
 
   Never _unimplemented() {

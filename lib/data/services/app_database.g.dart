@@ -1305,12 +1305,22 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
     type: DriftSqlType.double,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _cwdMeta = const VerificationMeta('cwd');
+  @override
+  late final GeneratedColumn<String> cwd = GeneratedColumn<String>(
+    'cwd',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
     anchorMessageId,
     width,
     scrollOffset,
+    cwd,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1353,6 +1363,12 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
         ),
       );
     }
+    if (data.containsKey('cwd')) {
+      context.handle(
+        _cwdMeta,
+        cwd.isAcceptableOrUnknown(data['cwd']!, _cwdMeta),
+      );
+    }
     return context;
   }
 
@@ -1378,6 +1394,10 @@ class $ColumnsTable extends Columns with TableInfo<$ColumnsTable, ColumnRow> {
         DriftSqlType.double,
         data['${effectivePrefix}scroll_offset'],
       ),
+      cwd: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}cwd'],
+      ),
     );
   }
 
@@ -1392,11 +1412,16 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
   final String? anchorMessageId;
   final double? width;
   final double? scrollOffset;
+
+  /// Working-directory tag for adapters that bind a cwd (e.g. Cursor local).
+  /// Not message state — passed on each bot invoke for this column.
+  final String? cwd;
   const ColumnRow({
     required this.id,
     this.anchorMessageId,
     this.width,
     this.scrollOffset,
+    this.cwd,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1410,6 +1435,9 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
     }
     if (!nullToAbsent || scrollOffset != null) {
       map['scroll_offset'] = Variable<double>(scrollOffset);
+    }
+    if (!nullToAbsent || cwd != null) {
+      map['cwd'] = Variable<String>(cwd);
     }
     return map;
   }
@@ -1426,6 +1454,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
       scrollOffset: scrollOffset == null && nullToAbsent
           ? const Value.absent()
           : Value(scrollOffset),
+      cwd: cwd == null && nullToAbsent ? const Value.absent() : Value(cwd),
     );
   }
 
@@ -1439,6 +1468,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
       anchorMessageId: serializer.fromJson<String?>(json['anchorMessageId']),
       width: serializer.fromJson<double?>(json['width']),
       scrollOffset: serializer.fromJson<double?>(json['scrollOffset']),
+      cwd: serializer.fromJson<String?>(json['cwd']),
     );
   }
   @override
@@ -1449,6 +1479,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
       'anchorMessageId': serializer.toJson<String?>(anchorMessageId),
       'width': serializer.toJson<double?>(width),
       'scrollOffset': serializer.toJson<double?>(scrollOffset),
+      'cwd': serializer.toJson<String?>(cwd),
     };
   }
 
@@ -1457,6 +1488,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
     Value<String?> anchorMessageId = const Value.absent(),
     Value<double?> width = const Value.absent(),
     Value<double?> scrollOffset = const Value.absent(),
+    Value<String?> cwd = const Value.absent(),
   }) => ColumnRow(
     id: id ?? this.id,
     anchorMessageId: anchorMessageId.present
@@ -1464,6 +1496,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
         : this.anchorMessageId,
     width: width.present ? width.value : this.width,
     scrollOffset: scrollOffset.present ? scrollOffset.value : this.scrollOffset,
+    cwd: cwd.present ? cwd.value : this.cwd,
   );
   ColumnRow copyWithCompanion(ColumnsCompanion data) {
     return ColumnRow(
@@ -1475,6 +1508,7 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
       scrollOffset: data.scrollOffset.present
           ? data.scrollOffset.value
           : this.scrollOffset,
+      cwd: data.cwd.present ? data.cwd.value : this.cwd,
     );
   }
 
@@ -1484,13 +1518,15 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
           ..write('id: $id, ')
           ..write('anchorMessageId: $anchorMessageId, ')
           ..write('width: $width, ')
-          ..write('scrollOffset: $scrollOffset')
+          ..write('scrollOffset: $scrollOffset, ')
+          ..write('cwd: $cwd')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(id, anchorMessageId, width, scrollOffset);
+  int get hashCode =>
+      Object.hash(id, anchorMessageId, width, scrollOffset, cwd);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1498,7 +1534,8 @@ class ColumnRow extends DataClass implements Insertable<ColumnRow> {
           other.id == this.id &&
           other.anchorMessageId == this.anchorMessageId &&
           other.width == this.width &&
-          other.scrollOffset == this.scrollOffset);
+          other.scrollOffset == this.scrollOffset &&
+          other.cwd == this.cwd);
 }
 
 class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
@@ -1506,12 +1543,14 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
   final Value<String?> anchorMessageId;
   final Value<double?> width;
   final Value<double?> scrollOffset;
+  final Value<String?> cwd;
   final Value<int> rowid;
   const ColumnsCompanion({
     this.id = const Value.absent(),
     this.anchorMessageId = const Value.absent(),
     this.width = const Value.absent(),
     this.scrollOffset = const Value.absent(),
+    this.cwd = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ColumnsCompanion.insert({
@@ -1519,6 +1558,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
     this.anchorMessageId = const Value.absent(),
     this.width = const Value.absent(),
     this.scrollOffset = const Value.absent(),
+    this.cwd = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id);
   static Insertable<ColumnRow> custom({
@@ -1526,6 +1566,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
     Expression<String>? anchorMessageId,
     Expression<double>? width,
     Expression<double>? scrollOffset,
+    Expression<String>? cwd,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1533,6 +1574,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
       if (anchorMessageId != null) 'anchor_message_id': anchorMessageId,
       if (width != null) 'width': width,
       if (scrollOffset != null) 'scroll_offset': scrollOffset,
+      if (cwd != null) 'cwd': cwd,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1542,6 +1584,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
     Value<String?>? anchorMessageId,
     Value<double?>? width,
     Value<double?>? scrollOffset,
+    Value<String?>? cwd,
     Value<int>? rowid,
   }) {
     return ColumnsCompanion(
@@ -1549,6 +1592,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
       anchorMessageId: anchorMessageId ?? this.anchorMessageId,
       width: width ?? this.width,
       scrollOffset: scrollOffset ?? this.scrollOffset,
+      cwd: cwd ?? this.cwd,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1568,6 +1612,9 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
     if (scrollOffset.present) {
       map['scroll_offset'] = Variable<double>(scrollOffset.value);
     }
+    if (cwd.present) {
+      map['cwd'] = Variable<String>(cwd.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1581,6 +1628,7 @@ class ColumnsCompanion extends UpdateCompanion<ColumnRow> {
           ..write('anchorMessageId: $anchorMessageId, ')
           ..write('width: $width, ')
           ..write('scrollOffset: $scrollOffset, ')
+          ..write('cwd: $cwd, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3981,6 +4029,7 @@ typedef $$ColumnsTableCreateCompanionBuilder =
       Value<String?> anchorMessageId,
       Value<double?> width,
       Value<double?> scrollOffset,
+      Value<String?> cwd,
       Value<int> rowid,
     });
 typedef $$ColumnsTableUpdateCompanionBuilder =
@@ -3989,6 +4038,7 @@ typedef $$ColumnsTableUpdateCompanionBuilder =
       Value<String?> anchorMessageId,
       Value<double?> width,
       Value<double?> scrollOffset,
+      Value<String?> cwd,
       Value<int> rowid,
     });
 
@@ -4060,6 +4110,11 @@ class $$ColumnsTableFilterComposer
 
   ColumnFilters<double> get scrollOffset => $composableBuilder(
     column: $table.scrollOffset,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get cwd => $composableBuilder(
+    column: $table.cwd,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -4136,6 +4191,11 @@ class $$ColumnsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get cwd => $composableBuilder(
+    column: $table.cwd,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$MessagesTableOrderingComposer get anchorMessageId {
     final $$MessagesTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -4179,6 +4239,9 @@ class $$ColumnsTableAnnotationComposer
     column: $table.scrollOffset,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get cwd =>
+      $composableBuilder(column: $table.cwd, builder: (column) => column);
 
   $$MessagesTableAnnotationComposer get anchorMessageId {
     final $$MessagesTableAnnotationComposer composer = $composerBuilder(
@@ -4265,12 +4328,14 @@ class $$ColumnsTableTableManager
                 Value<String?> anchorMessageId = const Value.absent(),
                 Value<double?> width = const Value.absent(),
                 Value<double?> scrollOffset = const Value.absent(),
+                Value<String?> cwd = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ColumnsCompanion(
                 id: id,
                 anchorMessageId: anchorMessageId,
                 width: width,
                 scrollOffset: scrollOffset,
+                cwd: cwd,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -4279,12 +4344,14 @@ class $$ColumnsTableTableManager
                 Value<String?> anchorMessageId = const Value.absent(),
                 Value<double?> width = const Value.absent(),
                 Value<double?> scrollOffset = const Value.absent(),
+                Value<String?> cwd = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ColumnsCompanion.insert(
                 id: id,
                 anchorMessageId: anchorMessageId,
                 width: width,
                 scrollOffset: scrollOffset,
+                cwd: cwd,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

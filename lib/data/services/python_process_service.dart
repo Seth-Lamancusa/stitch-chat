@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import '../core/logging/stitch_env.dart';
-import '../core/logging/stitch_log.dart';
+import '../../core/logging/stitch_env.dart';
+import '../../core/logging/stitch_log.dart';
 
 /// Port the local Python server listens on (must match python-server/protocol.py).
 const _serverPort = 8765;

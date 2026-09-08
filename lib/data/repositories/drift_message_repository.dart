@@ -103,6 +103,14 @@ class DriftMessageRepository implements MessageRepository {
   }
 
   @override
+  Future<List<RecipientRef>> getRecipients(String messageId) async {
+    final rows = await (_db.select(_db.recipientEdges)
+          ..where((t) => t.messageId.equals(messageId)))
+        .get();
+    return rows.map((row) => RecipientRef(recipientId: row.recipientId, kind: row.kind)).toList();
+  }
+
+  @override
   Future<void> deleteMessage(String id) {
     return (_db.delete(_db.messages)..where((t) => t.id.equals(id))).go();
   }

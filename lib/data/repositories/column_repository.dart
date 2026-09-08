@@ -7,12 +7,15 @@ class ColumnMeta {
   final String? anchorMessageId; // null = no messages sent into this column yet
   final double? width; // null = flexible
   final double? scrollOffset; // null = no saved scroll position
+  /// Column tag passed to bot invokes; null/empty = unset.
+  final String? cwd;
 
   const ColumnMeta({
     required this.id,
     required this.anchorMessageId,
     this.width,
     this.scrollOffset,
+    this.cwd,
   });
 }
 
@@ -37,6 +40,10 @@ abstract class ColumnRepository {
   /// decide the debounce policy, this just does the (atomic, single-row)
   /// write.
   Future<void> updateColumnScrollOffset(String id, double? scrollOffset);
+
+  /// Working-directory tag for this column's bot invokes. Empty string is
+  /// stored as null (unset).
+  Future<void> updateColumnCwd(String id, String? cwd);
 
   /// Atomic (parent, child) pointer-pair upsert for [columnId] — this pair
   /// is never updated independently, matching stitch-frontend's

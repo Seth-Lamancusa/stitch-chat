@@ -1,8 +1,9 @@
 """OpenAI-compatible Chat Completions handler (first Stitch bot path).
 
-Projects a Stitch context chain into `messages[]` and calls chat.completions.
-No strict role alternation, no name-prefixing, no session affinity — those
-belong in later adapter-local projectors if a runtime requires them.
+Projects a Stitch context window (trigger included as the last node) into
+`messages[]` and calls chat.completions. No strict role alternation, no
+name-prefixing, no session affinity — those belong in later adapter-local
+projectors if a runtime requires them.
 """
 
 from __future__ import annotations
@@ -31,9 +32,8 @@ _ROLE_TO_COMPLETIONS = {
 
 def project_context(
     context: Sequence[Mapping[str, Any]],
-    trigger_content: str,
 ) -> list[dict[str, str]]:
-    """Stitch context nodes + trigger text → Chat Completions messages[]."""
+    """Stitch context window (trigger last) → Chat Completions messages[]."""
     messages: list[dict[str, str]] = []
     for node in context:
         role = _ROLE_TO_COMPLETIONS.get(str(node.get("role", "")), "user")
@@ -41,21 +41,24 @@ def project_context(
         if not content:
             continue
         messages.append({"role": role, "content": content})
-    if trigger_content:
-        messages.append({"role": "user", "content": trigger_content})
     return messages
 
 
 async def stream_reply(
     *,
-    content: str,
     parent_message_id: str | None,
     bot_id: str,
     context: Sequence[Mapping[str, Any]],
     send: SendFn,
+    cwd: str | None = None,
     model: str | None = None,
 ) -> None:
-    """Call Chat Completions and emit message_start / message_end / error."""
+    """Call Chat Completions and emit message_start / message_end / error.
+
+    [cwd] is accepted for a uniform adapter invoke shape; Completions does
+    not bind a working directory. [context] already includes the trigger as
+    its final node.
+    """
     api_key = os.environ.get("OPENAI_API_KEY")
     base_url = os.environ.get("OPENAI_BASE_URL")  # OpenRouter / Ollama / etc.
     resolved_model = model or os.environ.get("OPENAI_MODEL") or protocol.DEFAULT_MODEL
@@ -63,10 +66,11 @@ async def stream_reply(
 
     hop(
         "py.adapter",
-        "start bot_id={} parent={} model={} context_len={} base_url={}",
+        "start bot_id={} parent={} model={} cwd={} context_len={} base_url={}",
         bot_id,
         parent_message_id,
         resolved_model,
+        cwd or "-",
         len(context),
         base_url or "default",
     )
@@ -93,7 +97,7 @@ async def stream_reply(
         client_kwargs["base_url"] = base_url
 
     client = AsyncOpenAI(**client_kwargs)
-    messages = project_context(context, content)
+    messages = project_context(context)
     hop(
         "py.adapter",
         "projected messages={} roles={}",

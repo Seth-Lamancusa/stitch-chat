@@ -64,6 +64,8 @@ A `runtime` is anything an adapter can invoke to produce model or agent output. 
 
 The Python server provides a bot manifest from a `BotRegistry`, advertising capabilities and availability. Dart doesn't know about adapters or runtimes.
 
+Concretely today: `protocol.BOT_REGISTRY` (python-server) is the single source of truth for bot ids and their `@tag` aliases (e.g. `chatgpt` answering to both `@chatgpt` and `@openai`); it's sent to Dart in the `bots` field of the `ready` envelope, and `BotRegistry` (lib/domain/bot_registry.dart) derives `@tag` matching from it — no bot id is hardcoded on the Dart side.
+
 #### Ownership
 
 * **Dart owns** — persistence (local and cloud, abstract data repo implementations), message identity.
@@ -113,6 +115,8 @@ Dart and the Python bridge share one log level and write sibling rotating files 
 | `STITCH_LOG_DIR` | `.env` or process env | `<projectRoot>/logs` |
 
 Levels: `TRACE` \| `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. Flutter loads `.env` at startup and passes both knobs into the Python subprocess, so one setting covers both processes.
+
+Bot keys in the same `.env`: `OPENAI_API_KEY` (Completions / `@chatgpt`), `CURSOR_API_KEY` (local Cursor SDK / `@cursor`). Cursor’s SDK runs in `python-server/runtimes/cursor/venv` — not the bridge venv.
 
 | File | Writer | Rotation |
 | --- | --- | --- |
