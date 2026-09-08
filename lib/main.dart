@@ -14,6 +14,7 @@ import 'data/services/app_database.dart';
 import 'data/services/local_identity_service.dart';
 import 'data/services/python_process_service.dart';
 import 'domain/branch_path_service.dart';
+import 'domain/message_store.dart';
 import 'ui/columns/columns_view.dart';
 import 'ui/columns/columns_viewmodel.dart';
 import 'ui/core/theme/app_theme.dart';
@@ -47,18 +48,31 @@ void main() async {
   final db = AppDatabase();
   final messageRepository = DriftMessageRepository(db);
   final columnRepository = DriftColumnRepository(db);
-  final branchPathService = BranchPathService(messageRepository, columnRepository);
+  final messageStore = MessageStore(messageRepository);
+  final branchPathService = BranchPathService(
+    messageRepository,
+    columnRepository,
+    messageStore,
+  );
 
-  final columnsViewModel = ColumnsViewModel(messageRepository, columnRepository, branchPathService, identityService);
+  final columnsViewModel = ColumnsViewModel(
+    messageRepository,
+    columnRepository,
+    branchPathService,
+    messageStore,
+    identityService,
+  );
   await columnsViewModel.initialize();
 
   final notificationService = NotificationService();
 
-  runApp(StitchApp(
-    columnsViewModel: columnsViewModel,
-    notificationService: notificationService,
-    themeService: themeService,
-  ));
+  runApp(
+    StitchApp(
+      columnsViewModel: columnsViewModel,
+      notificationService: notificationService,
+      themeService: themeService,
+    ),
+  );
 }
 
 class StitchApp extends StatefulWidget {
@@ -113,8 +127,12 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<NotificationService>.value(value: widget.notificationService),
-        ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
+        ChangeNotifierProvider<NotificationService>.value(
+          value: widget.notificationService,
+        ),
+        ChangeNotifierProvider<ColumnsViewModel>.value(
+          value: widget.columnsViewModel,
+        ),
         ChangeNotifierProvider<ThemeService>.value(value: widget.themeService),
       ],
       child: Consumer<ThemeService>(

@@ -6,27 +6,39 @@ import '../../data/repositories/column_repository.dart';
 import '../../data/repositories/message_repository.dart';
 import '../../data/services/local_identity_service.dart';
 import '../../domain/branch_path_service.dart';
+import '../../domain/message_store.dart';
 import '../core/adaptive_marker.dart';
 import 'column_ui_state.dart';
 
+/// How many hops [ColumnsViewModel.loadInitialWindow] resolves in each
+/// direction when a column shows an anchor it hasn't materialized before.
+const kDefaultRadius = 20;
+
+/// How many hops [ColumnsViewModel.extendAbove]/[extendBelow]/[revealStitch]
+/// resolve per batch.
+const kDefaultBatch = 20;
+
 /// Owns the multi-column shell: column CRUD/resize/active-selection, and
 /// per-column derivation of the currently-displayed branch plus navigator/
-/// marker state, via [BranchPathService]/[MessageRepository]/
-/// [ColumnRepository]. A thin wrapper over those, per
-/// `docs/flutter-best-practices.md`'s MVVM split — no traversal logic lives
-/// here, only orchestration + persistence of "which column is active".
-///
-/// Not yet doing §1's windowed loading (`BranchWindow`/radius/batch) from
-/// the column-ui-impl-plan — `BranchPathService.getFullVisibleBranch` still
-/// resolves the whole branch in one walk. For the seeded test threads this
-/// app ships with, that's an acceptable stand-in: it exercises the same
-/// navigator/marker/persistence logic end-to-end, just without pagination.
+/// marker state, via [BranchPathService]/[MessageStore]/[MessageRepository]/
+/// [ColumnRepository]. Per `docs/plans/message-loading-plan.md`, this is
+/// where the "hop" primitive ([selectCandidate]) and its batching
+/// ([defaultPage]) live — [BranchPathService] stays pure resolution/reads,
+/// this class owns persistence and the `ChangeNotifier`/loading-marker
+/// state that comes with it.
 class ColumnsViewModel extends ChangeNotifier {
-  ColumnsViewModel(this._messages, this._columns, this._branchPathService, this._identity);
+  ColumnsViewModel(
+    this._messages,
+    this._columns,
+    this._branchPathService,
+    this._store,
+    this._identity,
+  );
 
   final MessageRepository _messages;
   final ColumnRepository _columns;
   final BranchPathService _branchPathService;
+  final MessageStore _store;
   final LocalIdentityService _identity;
   static const _uuid = Uuid();
 
@@ -45,24 +57,33 @@ class ColumnsViewModel extends ChangeNotifier {
     final metas = await _columns.getColumns();
     for (final meta in metas) {
       _anchors[meta.id] = meta.anchorMessageId;
-      _states.add(ColumnUiState(id: meta.id, width: meta.width, initialScrollOffset: meta.scrollOffset));
+      _states.add(
+        ColumnUiState(
+          id: meta.id,
+          width: meta.width,
+          initialScrollOffset: meta.scrollOffset,
+        ),
+      );
     }
     if (_states.isNotEmpty) _states.first.isActive = true;
     for (final state in _states) {
-      await _refresh(state.id);
+      await _refresh(state.id, isFreshAnchor: true);
     }
     notifyListeners();
   }
 
   Future<void> addColumn({String? anchorMessageId, double? width}) async {
-    final meta = await _columns.createColumn(anchorMessageId: anchorMessageId, width: width);
+    final meta = await _columns.createColumn(
+      anchorMessageId: anchorMessageId,
+      width: width,
+    );
     _anchors[meta.id] = meta.anchorMessageId;
     for (final state in _states) {
       state.isActive = false;
     }
     _states.add(ColumnUiState(id: meta.id, width: meta.width, isActive: true));
     notifyListeners();
-    await _refresh(meta.id);
+    await _refresh(meta.id, isFreshAnchor: true);
     notifyListeners();
   }
 
@@ -100,22 +121,181 @@ class ColumnsViewModel extends ChangeNotifier {
     return _columns.updateColumnScrollOffset(id, scrollOffset);
   }
 
+  /// The single hop primitive — the only function that ever moves a branch
+  /// pointer (`docs/plans/message-loading-plan.md` §3). Sets the direction's
+  /// loading marker, hydrates [chosenId] via [MessageStore], persists the
+  /// pointer, then clears the marker. Used identically by [defaultPage]'s
+  /// automatic hops, [revealStitch]'s forced hop, and navigator-driven
+  /// explicit picks ([navigateOutgoing]/[navigateIncoming]) — only how
+  /// [chosenId] was picked differs per caller.
+  Future<void> selectCandidate(
+    String columnId,
+    String boundaryId,
+    String chosenId,
+    Direction direction,
+  ) async {
+    final state = _stateFor(columnId);
+    _setLoading(state, direction, true);
+    notifyListeners();
+    await _store.load(chosenId);
+    if (direction == Direction.outgoing) {
+      await _columns.setBranchPointer(columnId, boundaryId, chosenId);
+    } else {
+      await _columns.setVisibleIncoming(columnId, boundaryId, chosenId);
+    }
+    _setLoading(state, direction, false);
+    notifyListeners();
+  }
+
+  /// The only DB-loading/batching primitive. Resolves up to [batchSize] hops
+  /// from [boundaryId] in [direction]: walks any already-persisted pointer
+  /// for free, and only invokes [BranchPathService.resolveDefaultCandidate]
+  /// (persisting via [selectCandidate]) once the walk reaches genuinely
+  /// unset territory. Stops early at a stitch boundary (`hasMore: false`,
+  /// `stitchCount` set — never auto-triggered, this is what "Load stitches
+  /// (N)" renders) or a true end (`stitchCount: 0`).
+  Future<PageResult> defaultPage(
+    String columnId,
+    String boundaryId,
+    Direction direction,
+    int batchSize,
+  ) async {
+    final messages = <Message>[];
+    for (var i = 0; i < batchSize; i++) {
+      final existing = direction == Direction.outgoing
+          ? await _columns.getVisibleOutgoing(columnId, boundaryId)
+          : await _columns.getVisibleIncoming(columnId, boundaryId);
+      if (existing != null) {
+        final message = await _store.load(existing);
+        if (message == null) break;
+        messages.add(message);
+        boundaryId = message.id;
+        continue;
+      }
+
+      final replyCandidate = await _branchPathService.resolveDefaultCandidate(
+        boundaryId,
+        direction,
+      );
+      if (replyCandidate == null) {
+        final stitches = (await _branchPathService.candidatesAt(
+          boundaryId,
+          direction,
+        )).stitchCandidates;
+        return PageResult(
+          messages: messages,
+          hasMore: false,
+          stitchCount: stitches.length,
+        );
+      }
+
+      await selectCandidate(columnId, boundaryId, replyCandidate.id, direction);
+      messages.add(replyCandidate);
+      boundaryId = replyCandidate.id;
+    }
+    return PageResult(messages: messages, hasMore: true, stitchCount: 0);
+  }
+
+  /// Establishes the initial windowed view for a column showing an anchor
+  /// it hasn't materialized before: [kDefaultRadius] hops of [defaultPage]
+  /// in each direction from [anchorId]. Not a separate traversal — pure
+  /// composition, kept as a named entry point only because it's a distinct
+  /// `_refresh` trigger condition (a fresh anchor with nothing materialized).
+  Future<void> loadInitialWindow(String columnId, String anchorId) async {
+    await _store.load(anchorId);
+    await defaultPage(columnId, anchorId, Direction.incoming, kDefaultRadius);
+    await defaultPage(columnId, anchorId, Direction.outgoing, kDefaultRadius);
+  }
+
+  /// One forced hop across a stitch boundary (`AdaptiveMarker`'s "Load
+  /// stitches (N)" action), then resumes the ordinary [defaultPage] loop
+  /// from the new boundary to fill out the rest of the batch. Not a
+  /// separate mode — one resolution override, then falls back into the
+  /// ordinary loop.
+  Future<void> revealStitch(
+    String columnId,
+    String boundaryId,
+    Direction direction,
+  ) async {
+    final state = _stateFor(columnId);
+    _setError(state, direction, null);
+    try {
+      final stitch = await _branchPathService.resolveForcedStitchCandidate(
+        boundaryId,
+        direction,
+      );
+      if (stitch == null) return;
+      await selectCandidate(columnId, boundaryId, stitch.id, direction);
+      await defaultPage(columnId, stitch.id, direction, kDefaultBatch);
+    } catch (e) {
+      _setError(state, direction, e.toString());
+    } finally {
+      await _refresh(columnId);
+      notifyListeners();
+    }
+  }
+
+  /// `AdaptiveMarker`'s scroll-proximity auto-trigger for the top/bottom
+  /// "waiting" state: one [defaultPage] batch from the column's current
+  /// top/bottom boundary.
+  Future<void> extendAbove(String columnId) =>
+      _extend(columnId, Direction.incoming);
+  Future<void> extendBelow(String columnId) =>
+      _extend(columnId, Direction.outgoing);
+
+  Future<void> _extend(String columnId, Direction direction) async {
+    final state = _stateFor(columnId);
+    if (state.rows.isEmpty) return;
+    final boundaryId = direction == Direction.incoming
+        ? state.rows.first.message.id
+        : state.rows.last.message.id;
+    _setError(state, direction, null);
+    try {
+      await defaultPage(columnId, boundaryId, direction, kDefaultBatch);
+    } catch (e) {
+      _setError(state, direction, e.toString());
+    } finally {
+      await _refresh(columnId);
+      notifyListeners();
+    }
+  }
+
+  void _setLoading(ColumnUiState state, Direction direction, bool value) {
+    if (direction == Direction.incoming) {
+      state.topLoading = value;
+    } else {
+      state.bottomLoading = value;
+    }
+  }
+
+  void _setError(ColumnUiState state, Direction direction, String? message) {
+    if (direction == Direction.incoming) {
+      state.topError = message;
+    } else {
+      state.bottomError = message;
+    }
+  }
+
   /// Re-derives the column's branch from [parentId] itself rather than the
-  /// column's original anchor once navigation has moved past it: `_refresh`
-  /// walks the *whole* branch outward from whatever anchor it's given, and
-  /// for any unset fork along the way it persists a fresh default pointer
-  /// (`BranchPathService._visibleOrDefaultOutgoing`). Re-deriving from the
-  /// stale original anchor would walk back down through [parentId] and
-  /// re-assert its old default child — colliding with the switch we just
-  /// made, since `ColumnBranchPointers` has a unique key on childId (one
-  /// row serves both "this parent's visible child" and "this child's
-  /// visible parent"), silently reverting it. [parentId] is safe to anchor
-  /// on directly: its own upward context is untouched by this call, and its
-  /// downward pointer was *just* set to the new child by
-  /// [BranchPathService.navigateOutgoing], so re-deriving from here walks
-  /// through that fresh pointer instead of recomputing a stale default.
-  Future<void> navigateOutgoing(String columnId, String parentId, {required bool forward}) async {
-    await _branchPathService.navigateOutgoing(columnId, parentId, forward: forward);
+  /// column's original anchor once navigation has moved past it: [parentId]
+  /// is safe to anchor on directly because its own upward context is
+  /// untouched by this call, and its downward pointer was *just* set to the
+  /// new child by [selectCandidate], so re-deriving from here (via
+  /// `_refresh`'s ordinary `materializedTrajectory` walk) picks up that
+  /// fresh pointer instead of recomputing a stale default.
+  Future<void> navigateOutgoing(
+    String columnId,
+    String parentId, {
+    required bool forward,
+  }) async {
+    final chosenId = await _branchPathService.resolveExplicitOutgoing(
+      columnId,
+      parentId,
+      forward: forward,
+    );
+    if (chosenId != null) {
+      await selectCandidate(columnId, parentId, chosenId, Direction.outgoing);
+    }
     await _columns.updateColumnAnchor(columnId, parentId);
     _anchors[columnId] = parentId;
     await _refresh(columnId);
@@ -124,49 +304,26 @@ class ColumnsViewModel extends ChangeNotifier {
 
   /// Mirrors [navigateOutgoing]'s anchor-move for the upward direction:
   /// [childId] is safe to re-anchor on because its own downward pointer is
-  /// untouched and [BranchPathService.navigateIncoming] just set its
-  /// upward pointer to the new parent, so re-deriving from [childId]
-  /// follows that fresh pointer instead of walking back down from the
-  /// column's stale original anchor and re-asserting (and thereby
-  /// reverting) the old one.
-  Future<void> navigateIncoming(String columnId, String childId, {required bool forward}) async {
-    await _branchPathService.navigateIncoming(columnId, childId, forward: forward);
+  /// untouched and [selectCandidate] just set its upward pointer to the new
+  /// parent, so re-deriving from [childId] follows that fresh pointer
+  /// instead of walking back down from the column's stale original anchor.
+  Future<void> navigateIncoming(
+    String columnId,
+    String childId, {
+    required bool forward,
+  }) async {
+    final chosenId = await _branchPathService.resolveExplicitIncoming(
+      columnId,
+      childId,
+      forward: forward,
+    );
+    if (chosenId != null) {
+      await selectCandidate(columnId, childId, chosenId, Direction.incoming);
+    }
     await _columns.updateColumnAnchor(columnId, childId);
     _anchors[columnId] = childId;
     await _refresh(columnId);
     notifyListeners();
-  }
-
-  Future<void> loadStitchAbove(String columnId) async {
-    final state = _stateFor(columnId);
-    if (state.rows.isEmpty) return;
-    state.topLoading = true;
-    notifyListeners();
-    try {
-      await _branchPathService.navigateIncoming(columnId, state.rows.first.message.id, forward: true);
-      await _refresh(columnId);
-    } catch (e) {
-      state.topError = e.toString();
-    } finally {
-      state.topLoading = false;
-      notifyListeners();
-    }
-  }
-
-  Future<void> loadStitchBelow(String columnId) async {
-    final state = _stateFor(columnId);
-    if (state.rows.isEmpty) return;
-    state.bottomLoading = true;
-    notifyListeners();
-    try {
-      await _branchPathService.navigateOutgoing(columnId, state.rows.last.message.id, forward: true);
-      await _refresh(columnId);
-    } catch (e) {
-      state.bottomError = e.toString();
-    } finally {
-      state.bottomLoading = false;
-      notifyListeners();
-    }
   }
 
   /// Marks [messageId] as the parent the next [sendMessage] call in
@@ -200,7 +357,9 @@ class ColumnsViewModel extends ChangeNotifier {
   Future<void> sendMessage(String columnId, String content) async {
     if (content.trim().isEmpty) return;
     final state = _stateFor(columnId);
-    final parentId = state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+    final parentId =
+        state.replyingToMessageId ??
+        (state.rows.isNotEmpty ? state.rows.last.message.id : null);
     final newMessage = Message(
       id: _uuid.v4(),
       role: MessageRole.user,
@@ -224,10 +383,27 @@ class ColumnsViewModel extends ChangeNotifier {
 
   ColumnUiState _stateFor(String id) => _states.firstWhere((s) => s.id == id);
 
-  Future<void> _refresh(String columnId) async {
+  Future<void> _refresh(String columnId, {bool isFreshAnchor = false}) async {
     final state = _stateFor(columnId);
     final anchorId = _anchors[columnId];
-    final branch = anchorId == null ? const <Message>[] : await _branchPathService.getFullVisibleBranch(columnId, anchorId);
+
+    if (anchorId == null) {
+      state.rows = const [];
+      state.topMarker = MarkerVisualState.end;
+      state.bottomMarker = MarkerVisualState.end;
+      state.topStitchCount = 0;
+      state.bottomStitchCount = 0;
+      return;
+    }
+
+    if (isFreshAnchor) {
+      await loadInitialWindow(columnId, anchorId);
+    }
+
+    final branch = await _branchPathService.materializedTrajectory(
+      columnId,
+      anchorId,
+    );
 
     final rows = <MessageRowData>[];
     for (var i = 0; i < branch.length; i++) {
@@ -251,17 +427,21 @@ class ColumnsViewModel extends ChangeNotifier {
       var incomingIndex = -1;
       if (i > 0) {
         incoming = await _messages.getIncoming(message.id);
-        incomingIndex = incoming.all.indexWhere((m) => m.id == branch[i - 1].id);
+        incomingIndex = incoming.all.indexWhere(
+          (m) => m.id == branch[i - 1].id,
+        );
       }
 
-      rows.add(MessageRowData(
-        message: message,
-        outgoing: outgoing,
-        outgoingCurrentIndex: outgoingIndex,
-        outgoingAnchorId: outgoingAnchorId,
-        incoming: incoming,
-        incomingCurrentIndex: incomingIndex,
-      ));
+      rows.add(
+        MessageRowData(
+          message: message,
+          outgoing: outgoing,
+          outgoingCurrentIndex: outgoingIndex,
+          outgoingAnchorId: outgoingAnchorId,
+          incoming: incoming,
+          incomingCurrentIndex: incomingIndex,
+        ),
+      );
     }
     state.rows = rows;
 
@@ -273,17 +453,34 @@ class ColumnsViewModel extends ChangeNotifier {
       return;
     }
 
-    // getFullVisibleBranch always walks reply ancestry/descent to
-    // completion (no windowing yet, see class doc) — so the top of the
-    // branch is always a true reply root and the bottom a true reply leaf.
-    // Any stitch neighbors there are exactly the boundary case the marker
-    // needs to surface.
-    final topIncoming = await _messages.getIncoming(branch.first.id);
-    state.topStitchCount = topIncoming.stitchedIncoming.length;
-    state.topMarker = MarkerVisualState.end;
+    final top = await _branchPathService.candidatesAt(
+      branch.first.id,
+      Direction.incoming,
+    );
+    state.topStitchCount = top.stitchCandidates.length;
+    state.topMarker = top.replyCandidate != null
+        ? MarkerVisualState.waiting
+        : MarkerVisualState.end;
 
-    final bottomOutgoing = await _messages.getOutgoing(branch.last.id);
-    state.bottomStitchCount = bottomOutgoing.stitchedOutgoing.length;
-    state.bottomMarker = MarkerVisualState.end;
+    final bottom = await _branchPathService.candidatesAt(
+      branch.last.id,
+      Direction.outgoing,
+    );
+    state.bottomStitchCount = bottom.stitchCandidates.length;
+    state.bottomMarker = bottom.replyCandidate != null
+        ? MarkerVisualState.waiting
+        : MarkerVisualState.end;
   }
+}
+
+/// Result of one [ColumnsViewModel.defaultPage] batch.
+class PageResult {
+  final List<Message> messages;
+  final bool hasMore;
+  final int stitchCount;
+  const PageResult({
+    required this.messages,
+    required this.hasMore,
+    required this.stitchCount,
+  });
 }

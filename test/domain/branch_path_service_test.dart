@@ -3,6 +3,7 @@ import 'package:stitch_chat/data/models/message.dart';
 import 'package:stitch_chat/data/repositories/column_repository.dart';
 import 'package:stitch_chat/data/repositories/message_repository.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 
 class FakeMessageRepository implements MessageRepository {
   final Map<String, Message> _messages = {};
@@ -23,7 +24,10 @@ class FakeMessageRepository implements MessageRepository {
   Future<OutgoingEdges> getOutgoing(String parentId) async {
     List<Message> sorted(List<String> ids) {
       final list = ids.map((id) => _messages[id]!).toList();
-      list.sort((a, b) => (a.createdAt ?? DateTime(0)).compareTo(b.createdAt ?? DateTime(0)));
+      list.sort(
+        (a, b) =>
+            (a.createdAt ?? DateTime(0)).compareTo(b.createdAt ?? DateTime(0)),
+      );
       return list;
     }
 
@@ -65,13 +69,21 @@ class FakeMessageRepository implements MessageRepository {
   }
 
   @override
-  Future<void> addStitchEdge(String fromId, String toId, {String? createdByAuthorId}) async {
+  Future<void> addStitchEdge(
+    String fromId,
+    String toId, {
+    String? createdByAuthorId,
+  }) async {
     (_stitchChildrenOf[fromId] ??= []).add(toId);
     (_stitchParentsOf[toId] ??= []).add(fromId);
   }
 
   @override
-  Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind) async {}
+  Future<void> addRecipientEdge(
+    String messageId,
+    String recipientId,
+    RecipientKind kind,
+  ) async {}
 
   @override
   Future<void> deleteMessage(String id) async => _messages.remove(id);
@@ -83,9 +95,16 @@ class FakeColumnRepository implements ColumnRepository {
   final Map<String, Map<String, String>> _visibleIncoming = {};
 
   @override
-  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({
+    String? anchorMessageId,
+    double? width,
+  }) async {
     final id = 'col-${_columns.length}';
-    final meta = ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
+    final meta = ColumnMeta(
+      id: id,
+      anchorMessageId: anchorMessageId,
+      width: width,
+    );
     _columns[id] = meta;
     return meta;
   }
@@ -103,13 +122,21 @@ class FakeColumnRepository implements ColumnRepository {
   @override
   Future<void> updateColumnWidth(String id, double? width) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: existing.anchorMessageId, width: width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: width,
+    );
   }
 
   @override
   Future<void> updateColumnAnchor(String id, String anchorMessageId) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: anchorMessageId, width: existing.width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: anchorMessageId,
+      width: existing.width,
+    );
   }
 
   @override
@@ -124,7 +151,11 @@ class FakeColumnRepository implements ColumnRepository {
   }
 
   @override
-  Future<void> setBranchPointer(String columnId, String parentId, String childId) async {
+  Future<void> setBranchPointer(
+    String columnId,
+    String parentId,
+    String childId,
+  ) async {
     (_visibleOutgoing[columnId] ??= {})[parentId] = childId;
     (_visibleIncoming[columnId] ??= {})[childId] = parentId;
   }
@@ -138,7 +169,11 @@ class FakeColumnRepository implements ColumnRepository {
       _visibleIncoming[columnId]?[messageId];
 
   @override
-  Future<void> setVisibleIncoming(String columnId, String childId, String newParentId) async {
+  Future<void> setVisibleIncoming(
+    String columnId,
+    String childId,
+    String newParentId,
+  ) async {
     final oldParentId = _visibleIncoming[columnId]?[childId];
     if (oldParentId != null) {
       _visibleOutgoing[columnId]?.remove(oldParentId);
@@ -151,117 +186,214 @@ class FakeColumnRepository implements ColumnRepository {
 void main() {
   late FakeMessageRepository messages;
   late FakeColumnRepository columns;
+  late MessageStore store;
   late BranchPathService service;
   const columnId = 'col-1';
 
   setUp(() {
     messages = FakeMessageRepository();
     columns = FakeColumnRepository();
-    service = BranchPathService(messages, columns);
+    store = MessageStore(messages);
+    service = BranchPathService(messages, columns, store);
   });
 
-  Message msg(String id, DateTime createdAt) =>
-      Message(id: id, role: MessageRole.user, content: id, createdAt: createdAt);
+  Message msg(String id, DateTime createdAt) => Message(
+    id: id,
+    role: MessageRole.user,
+    content: id,
+    createdAt: createdAt,
+  );
 
-  group('boundaries', () {
-    test('a root with no children returns just itself', () async {
+  group('materializedTrajectory', () {
+    test('an unknown anchor returns an empty branch', () async {
+      expect(
+        await service.materializedTrajectory(columnId, 'missing'),
+        isEmpty,
+      );
+    });
+
+    test('a root with no pointers set returns just itself', () async {
       await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
 
-      final branch = await service.getFullVisibleBranch(columnId, 'root');
+      final branch = await service.materializedTrajectory(columnId, 'root');
 
       expect(branch.map((m) => m.id).toList(), ['root']);
     });
 
-    test('a leaf anchor returns its ancestry followed by itself, with nothing below', () async {
+    test(
+      'never falls back to reply-structural ancestry when no incoming pointer is set',
+      () async {
+        // Unlike the old getFullVisibleBranch/_visibleOrStructuralIncoming,
+        // materializedTrajectory is a pure pointer read — an unset incoming
+        // pointer stops the walk, even though 'leaf' has a real reply parent.
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 2)));
+        await messages.addReplyEdge('root', 'leaf');
+
+        final branch = await service.materializedTrajectory(columnId, 'leaf');
+
+        expect(branch.map((m) => m.id).toList(), ['leaf']);
+      },
+    );
+
+    test(
+      'walks both directions via persisted pointers, stopping at the first unset one',
+      () async {
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(msg('mid', DateTime.utc(2026, 1, 2)));
+        await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 3)));
+        await messages.saveMessage(msg('beyond', DateTime.utc(2026, 1, 4)));
+        await messages.addReplyEdge('root', 'mid');
+        await messages.addReplyEdge('mid', 'leaf');
+        await messages.addReplyEdge('leaf', 'beyond');
+        await columns.setBranchPointer(columnId, 'root', 'mid');
+        await columns.setBranchPointer(columnId, 'mid', 'leaf');
+        // No pointer set below 'leaf' or above 'root' — walk stops there even
+        // though 'beyond' exists structurally.
+
+        final branch = await service.materializedTrajectory(columnId, 'mid');
+
+        expect(branch.map((m) => m.id).toList(), ['root', 'mid', 'leaf']);
+      },
+    );
+  });
+
+  group('candidatesAt / resolveDefaultCandidate', () {
+    test(
+      'resolves the most-recent reply child outgoing, ignoring stitch children',
+      () async {
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
+        await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
+        await messages.saveMessage(
+          msg('stitchChild', DateTime.utc(2026, 1, 4)),
+        );
+        await messages.addReplyEdge('root', 'older');
+        await messages.addReplyEdge('root', 'newer');
+        await messages.addStitchEdge('root', 'stitchChild');
+
+        final candidate = await service.resolveDefaultCandidate(
+          'root',
+          Direction.outgoing,
+        );
+
+        expect(candidate?.id, 'newer');
+      },
+    );
+
+    test('resolves the single reply parent incoming', () async {
       await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
       await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 2)));
       await messages.addReplyEdge('root', 'leaf');
 
-      final branch = await service.getFullVisibleBranch(columnId, 'leaf');
+      final candidate = await service.resolveDefaultCandidate(
+        'leaf',
+        Direction.incoming,
+      );
 
-      expect(branch.map((m) => m.id).toList(), ['root', 'leaf']);
+      expect(candidate?.id, 'root');
     });
 
-    test('an unknown anchor returns an empty branch', () async {
-      expect(await service.getFullVisibleBranch(columnId, 'missing'), isEmpty);
-    });
-  });
+    test(
+      'is null when only a stitch child exists, even though it is the only child',
+      () async {
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(
+          msg('stitchChild', DateTime.utc(2026, 1, 2)),
+        );
+        await messages.addStitchEdge('root', 'stitchChild');
 
-  group('fork defaulting', () {
-    test('defaults to the most-recently-created child at an unset fork, and persists it', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
-      await messages.addReplyEdge('root', 'older');
-      await messages.addReplyEdge('root', 'newer');
+        final candidate = await service.resolveDefaultCandidate(
+          'root',
+          Direction.outgoing,
+        );
 
-      final branch = await service.getFullVisibleBranch(columnId, 'root');
+        expect(candidate, isNull);
+      },
+    );
 
-      expect(branch.map((m) => m.id).toList(), ['root', 'newer']);
-      expect(await columns.getVisibleOutgoing(columnId, 'root'), 'newer');
-    });
-
-    test('an already-persisted pointer overrides the most-recent default', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
-      await messages.addReplyEdge('root', 'older');
-      await messages.addReplyEdge('root', 'newer');
-      await columns.setBranchPointer(columnId, 'root', 'older');
-
-      final branch = await service.getFullVisibleBranch(columnId, 'root');
-
-      expect(branch.map((m) => m.id).toList(), ['root', 'older']);
-    });
-
-    test('defaulting continues recursively down multiple forks', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('mid', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('leafA', DateTime.utc(2026, 1, 3)));
-      await messages.saveMessage(msg('leafB', DateTime.utc(2026, 1, 4)));
-      await messages.addReplyEdge('root', 'mid');
-      await messages.addReplyEdge('mid', 'leafA');
-      await messages.addReplyEdge('mid', 'leafB');
-
-      final branch = await service.getFullVisibleBranch(columnId, 'root');
-
-      expect(branch.map((m) => m.id).toList(), ['root', 'mid', 'leafB']);
-    });
-
-    test('defaulting never auto-follows a stitch child, even if it is the only child', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('stitchChild', DateTime.utc(2026, 1, 2)));
-      await messages.addStitchEdge('root', 'stitchChild');
-
-      final branch = await service.getFullVisibleBranch(columnId, 'root');
-
-      expect(branch.map((m) => m.id).toList(), ['root']);
-    });
-  });
-
-  group('findLatestDescendant', () {
-    test('descends via the most-recent child at each fork until a leaf', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
-      await messages.saveMessage(msg('newerLeaf', DateTime.utc(2026, 1, 4)));
-      await messages.addReplyEdge('root', 'older');
-      await messages.addReplyEdge('root', 'newer');
-      await messages.addReplyEdge('newer', 'newerLeaf');
-
-      final latest = await service.findLatestDescendant('root');
-
-      expect(latest.id, 'newerLeaf');
-    });
-
-    test('a leaf is its own latest descendant', () async {
+    test('is null at a true dead end', () async {
       await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 1)));
 
-      expect((await service.findLatestDescendant('leaf')).id, 'leaf');
+      expect(
+        await service.resolveDefaultCandidate('leaf', Direction.outgoing),
+        isNull,
+      );
+      expect(
+        await service.resolveDefaultCandidate('leaf', Direction.incoming),
+        isNull,
+      );
+    });
+
+    test(
+      'candidatesAt reports the stitch pool alongside the reply candidate',
+      () async {
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(msg('replyChild', DateTime.utc(2026, 1, 2)));
+        await messages.saveMessage(
+          msg('stitchChild', DateTime.utc(2026, 1, 3)),
+        );
+        await messages.addReplyEdge('root', 'replyChild');
+        await messages.addStitchEdge('root', 'stitchChild');
+
+        final candidates = await service.candidatesAt(
+          'root',
+          Direction.outgoing,
+        );
+
+        expect(candidates.replyCandidate?.id, 'replyChild');
+        expect(candidates.stitchCandidates.map((m) => m.id).toList(), [
+          'stitchChild',
+        ]);
+      },
+    );
+  });
+
+  group('resolveForcedStitchCandidate', () {
+    test('returns the first stitch candidate outgoing', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('stitchA', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('stitchB', DateTime.utc(2026, 1, 3)));
+      await messages.addStitchEdge('root', 'stitchA');
+      await messages.addStitchEdge('root', 'stitchB');
+
+      final candidate = await service.resolveForcedStitchCandidate(
+        'root',
+        Direction.outgoing,
+      );
+
+      expect(candidate?.id, 'stitchA');
+    });
+
+    test('returns the first stitch parent incoming', () async {
+      await messages.saveMessage(
+        msg('stitchParentA', DateTime.utc(2026, 1, 1)),
+      );
+      await messages.saveMessage(
+        msg('stitchParentB', DateTime.utc(2026, 1, 2)),
+      );
+      await messages.saveMessage(msg('child', DateTime.utc(2026, 1, 3)));
+      await messages.addStitchEdge('stitchParentA', 'child');
+      await messages.addStitchEdge('stitchParentB', 'child');
+
+      final candidate = await service.resolveForcedStitchCandidate(
+        'child',
+        Direction.incoming,
+      );
+
+      expect(candidate?.id, 'stitchParentA');
+    });
+
+    test('is null with no stitch candidates', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      expect(
+        await service.resolveForcedStitchCandidate('root', Direction.outgoing),
+        isNull,
+      );
     });
   });
 
-  group('navigateOutgoing', () {
+  group('resolveExplicitOutgoing', () {
     setUp(() async {
       await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
       await messages.saveMessage(msg('a', DateTime.utc(2026, 1, 2)));
@@ -272,132 +404,206 @@ void main() {
       await messages.addReplyEdge('root', 'c');
     });
 
-    test('forward from unset moves to the first sibling', () async {
-      final branch = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['root', 'a']);
+    test('forward from unset resolves to the first sibling', () async {
+      expect(
+        await service.resolveExplicitOutgoing(columnId, 'root', forward: true),
+        'a',
+      );
     });
 
-    test('backward from unset moves to the last sibling', () async {
-      final branch = await service.navigateOutgoing(columnId, 'root', forward: false);
-      expect(branch.map((m) => m.id).toList(), ['root', 'c']);
+    test('backward from unset resolves to the last sibling', () async {
+      expect(
+        await service.resolveExplicitOutgoing(columnId, 'root', forward: false),
+        'c',
+      );
     });
 
-    test('forward advances to the next sibling and clamps at the end', () async {
-      await columns.setBranchPointer(columnId, 'root', 'a');
+    test(
+      'forward advances to the next sibling and clamps at the end',
+      () async {
+        await columns.setBranchPointer(columnId, 'root', 'a');
 
-      var branch = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['root', 'b']);
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: true,
+          ),
+          'b',
+        );
+        await columns.setBranchPointer(columnId, 'root', 'b');
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: true,
+          ),
+          'c',
+        );
+        await columns.setBranchPointer(columnId, 'root', 'c');
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: true,
+          ),
+          'c',
+        );
+      },
+    );
 
-      branch = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['root', 'c']);
+    test(
+      'backward retreats to the previous sibling and clamps at the start',
+      () async {
+        await columns.setBranchPointer(columnId, 'root', 'c');
 
-      branch = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['root', 'c']);
-    });
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: false,
+          ),
+          'b',
+        );
+        await columns.setBranchPointer(columnId, 'root', 'b');
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: false,
+          ),
+          'a',
+        );
+        await columns.setBranchPointer(columnId, 'root', 'a');
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: false,
+          ),
+          'a',
+        );
+      },
+    );
 
-    test('backward retreats to the previous sibling and clamps at the start', () async {
-      await columns.setBranchPointer(columnId, 'root', 'c');
+    test(
+      'sees the combined reply-then-stitch pool, unlike default resolution',
+      () async {
+        await messages.saveMessage(
+          msg('stitchChild', DateTime.utc(2026, 1, 5)),
+        );
+        await messages.addStitchEdge('root', 'stitchChild');
+        await columns.setBranchPointer(columnId, 'root', 'c');
 
-      var branch = await service.navigateOutgoing(columnId, 'root', forward: false);
-      expect(branch.map((m) => m.id).toList(), ['root', 'b']);
+        expect(
+          await service.resolveExplicitOutgoing(
+            columnId,
+            'root',
+            forward: true,
+          ),
+          'stitchChild',
+        );
+      },
+    );
 
-      branch = await service.navigateOutgoing(columnId, 'root', forward: false);
-      expect(branch.map((m) => m.id).toList(), ['root', 'a']);
-
-      branch = await service.navigateOutgoing(columnId, 'root', forward: false);
-      expect(branch.map((m) => m.id).toList(), ['root', 'a']);
-    });
-
-    test('switching outgoing re-derives the path below the switch point', () async {
-      await messages.saveMessage(msg('aChild', DateTime.utc(2026, 1, 5)));
-      await messages.addReplyEdge('a', 'aChild');
-      await columns.setBranchPointer(columnId, 'root', 'a');
-      await columns.setBranchPointer(columnId, 'a', 'aChild');
-
-      final branch = await service.navigateOutgoing(columnId, 'root', forward: true);
-
-      expect(branch.map((m) => m.id).toList(), ['root', 'b']);
-    });
-
-    test('a parent with no children returns its unchanged branch', () async {
-      final branch = await service.navigateOutgoing(columnId, 'a', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['root', 'a']);
+    test('a parent with no children resolves to null', () async {
+      expect(
+        await service.resolveExplicitOutgoing(columnId, 'a', forward: true),
+        isNull,
+      );
     });
   });
 
-  group('navigateIncoming', () {
+  group('resolveExplicitIncoming', () {
     setUp(() async {
       await messages.saveMessage(msg('replyParent', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('stitchParentA', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('stitchParentB', DateTime.utc(2026, 1, 3)));
+      await messages.saveMessage(
+        msg('stitchParentA', DateTime.utc(2026, 1, 2)),
+      );
+      await messages.saveMessage(
+        msg('stitchParentB', DateTime.utc(2026, 1, 3)),
+      );
       await messages.saveMessage(msg('child', DateTime.utc(2026, 1, 4)));
       await messages.addReplyEdge('replyParent', 'child');
       await messages.addStitchEdge('stitchParentA', 'child');
       await messages.addStitchEdge('stitchParentB', 'child');
     });
 
-    test('forward from unset lands on the first pool entry (the reply parent itself)', () async {
-      final branch = await service.navigateIncoming(columnId, 'child', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['replyParent', 'child']);
+    test('forward from unset resolves to the reply parent first', () async {
+      expect(
+        await service.resolveExplicitIncoming(columnId, 'child', forward: true),
+        'replyParent',
+      );
     });
 
-    test('backward from unset wraps to the last stitch parent', () async {
-      final branch = await service.navigateIncoming(columnId, 'child', forward: false);
-      expect(branch.map((m) => m.id).toList(), ['stitchParentB', 'child']);
+    test('backward from unset resolves to the last stitch parent', () async {
+      expect(
+        await service.resolveExplicitIncoming(
+          columnId,
+          'child',
+          forward: false,
+        ),
+        'stitchParentB',
+      );
     });
 
-    test('forward cycles through the pool in reply-then-stitch order and clamps at the end', () async {
-      var branch = await service.navigateIncoming(columnId, 'child', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['replyParent', 'child']);
-
-      branch = await service.navigateIncoming(columnId, 'child', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['stitchParentA', 'child']);
-
-      branch = await service.navigateIncoming(columnId, 'child', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['stitchParentB', 'child']);
-
-      branch = await service.navigateIncoming(columnId, 'child', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['stitchParentB', 'child']);
-    });
-
-    test('backward from a stitch parent returns to the reply parent', () async {
-      await columns.setVisibleIncoming(columnId, 'child', 'stitchParentA');
-
-      final branch = await service.navigateIncoming(columnId, 'child', forward: false);
-
-      expect(branch.map((m) => m.id).toList(), ['replyParent', 'child']);
-    });
-
-    test('a child with no incoming edges returns its unchanged branch', () async {
-      await messages.saveMessage(msg('lonely', DateTime.utc(2026, 1, 5)));
-      final branch = await service.navigateIncoming(columnId, 'lonely', forward: true);
-      expect(branch.map((m) => m.id).toList(), ['lonely']);
-    });
-
-    test('switching incoming re-derives everything above the switch point', () async {
-      await messages.saveMessage(msg('grandparent', DateTime.utc(2025, 12, 31)));
-      await messages.addReplyEdge('grandparent', 'stitchParentA');
+    test('forward cycles reply-then-stitch and clamps at the end', () async {
+      expect(
+        await service.resolveExplicitIncoming(columnId, 'child', forward: true),
+        'replyParent',
+      );
       await columns.setVisibleIncoming(columnId, 'child', 'replyParent');
+      expect(
+        await service.resolveExplicitIncoming(columnId, 'child', forward: true),
+        'stitchParentA',
+      );
+      await columns.setVisibleIncoming(columnId, 'child', 'stitchParentA');
+      expect(
+        await service.resolveExplicitIncoming(columnId, 'child', forward: true),
+        'stitchParentB',
+      );
+      await columns.setVisibleIncoming(columnId, 'child', 'stitchParentB');
+      expect(
+        await service.resolveExplicitIncoming(columnId, 'child', forward: true),
+        'stitchParentB',
+      );
+    });
 
-      final branch = await service.navigateIncoming(columnId, 'child', forward: true);
-
-      expect(branch.map((m) => m.id).toList(), ['grandparent', 'stitchParentA', 'child']);
+    test('a child with no incoming edges resolves to null', () async {
+      await messages.saveMessage(msg('lonely', DateTime.utc(2026, 1, 5)));
+      expect(
+        await service.resolveExplicitIncoming(
+          columnId,
+          'lonely',
+          forward: true,
+        ),
+        isNull,
+      );
     });
   });
 
-  group('combined reply + stitch pool', () {
-    test('outgoing defaulting sees reply children only, but explicit navigation sees stitch children too', () async {
-      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
-      await messages.saveMessage(msg('replyChild', DateTime.utc(2026, 1, 2)));
-      await messages.saveMessage(msg('stitchChild', DateTime.utc(2026, 1, 3)));
-      await messages.addReplyEdge('root', 'replyChild');
-      await messages.addStitchEdge('root', 'stitchChild');
+  group('findLatestDescendant', () {
+    test(
+      'descends via the most-recent child at each fork until a leaf',
+      () async {
+        await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+        await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
+        await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
+        await messages.saveMessage(msg('newerLeaf', DateTime.utc(2026, 1, 4)));
+        await messages.addReplyEdge('root', 'older');
+        await messages.addReplyEdge('root', 'newer');
+        await messages.addReplyEdge('newer', 'newerLeaf');
 
-      final forwardOnce = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(forwardOnce.map((m) => m.id).toList(), ['root', 'replyChild']);
+        final latest = await service.findLatestDescendant('root');
 
-      final forwardTwice = await service.navigateOutgoing(columnId, 'root', forward: true);
-      expect(forwardTwice.map((m) => m.id).toList(), ['root', 'stitchChild']);
+        expect(latest.id, 'newerLeaf');
+      },
+    );
+
+    test('a leaf is its own latest descendant', () async {
+      await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 1)));
+
+      expect((await service.findLatestDescendant('leaf')).id, 'leaf');
     });
   });
 }

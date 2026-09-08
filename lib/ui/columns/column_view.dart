@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../data/models/message.dart';
+import '../../domain/branch_path_service.dart' show Direction;
 import '../core/adaptive_marker.dart';
 import '../core/incoming_navigator.dart';
 import '../core/message_card.dart';
@@ -173,6 +174,11 @@ class _MessageListState extends State<_MessageList> {
   static const double _bottomThreshold = 2;
   static const Duration _scrollSaveDebounce = Duration(milliseconds: 400);
 
+  // How close to an edge (in pixels) triggers an auto-load of the next
+  // batch — per `docs/plans/message-loading-plan.md` §7's intersection-
+  // observer-style margin.
+  static const double _loadMoreMargin = 200;
+
   final _scrollController = ScrollController();
   bool _isAtBottom = true;
   bool _restoredInitialOffset = false;
@@ -205,8 +211,9 @@ class _MessageListState extends State<_MessageList> {
   /// Runs [action] (a new outgoing message) and, if the user was already
   /// pinned to the bottom, keeps them there. This is deliberately *not* a
   /// generic "row count changed" reaction in [didUpdateWidget]: that would
-  /// also fire for [loadStitchAbove]/[loadStitchBelow] (an explicit "load
-  /// more" tap, which shouldn't also yank the view) and for branch switches
+  /// also fire for [ColumnsViewModel.extendAbove]/[ColumnsViewModel.extendBelow]/
+  /// [ColumnsViewModel.revealStitch] (an explicit or auto-triggered "load
+  /// more", which shouldn't also yank the view) and for branch switches
   /// (already handled, and in the opposite way, by the column's persisted
   /// anchor — see `_centerKey`). Scroll intent lives with the action that
   /// causes it instead of being
@@ -227,12 +234,38 @@ class _MessageListState extends State<_MessageList> {
   void _onScroll() {
     _updateIsAtBottom();
     _scheduleScrollSave();
+    _maybeTriggerLoadMore();
+  }
+
+  // Scroll-proximity auto-trigger for a `waiting` marker: fires
+  // `extendAbove`/`extendBelow` once the viewport comes within
+  // `_loadMoreMargin` of an edge that has more to load. Re-entrancy is
+  // guarded by `topLoading`/`bottomLoading`, which `ColumnsViewModel`
+  // flips synchronously before its first await — so a scroll frame arriving
+  // before the triggered load completes just sees loading == true and
+  // skips.
+  void _maybeTriggerLoadMore() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final state = widget.state;
+    final vm = context.read<ColumnsViewModel>();
+    if (state.topMarker == MarkerVisualState.waiting &&
+        !state.topLoading &&
+        position.pixels - position.minScrollExtent <= _loadMoreMargin) {
+      vm.extendAbove(state.id);
+    }
+    if (state.bottomMarker == MarkerVisualState.waiting &&
+        !state.bottomLoading &&
+        position.maxScrollExtent - position.pixels <= _loadMoreMargin) {
+      vm.extendBelow(state.id);
+    }
   }
 
   void _updateIsAtBottom() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
-    _isAtBottom = (position.maxScrollExtent - position.pixels) <= _bottomThreshold;
+    _isAtBottom =
+        (position.maxScrollExtent - position.pixels) <= _bottomThreshold;
   }
 
   void _scrollToBottom() {
@@ -266,15 +299,17 @@ class _MessageListState extends State<_MessageList> {
     if (_restoredInitialOffset || !_scrollController.hasClients) return;
     _restoredInitialOffset = true;
     final offset = widget.state.initialScrollOffset;
-    if (offset == null) return;
-    final position = _scrollController.position;
-    // Offsets into the before-anchor sliver are legitimately negative now
-    // (`minScrollExtent` is negative for a `center`-based CustomScrollView),
-    // unlike the old reversed ListView where 0 was always the lower bound.
-    _scrollController.jumpTo(
-      offset.clamp(position.minScrollExtent, position.maxScrollExtent),
-    );
-    _updateIsAtBottom();
+    if (offset != null) {
+      final position = _scrollController.position;
+      // Offsets into the before-anchor sliver are legitimately negative now
+      // (`minScrollExtent` is negative for a `center`-based CustomScrollView),
+      // unlike the old reversed ListView where 0 was always the lower bound.
+      _scrollController.jumpTo(
+        offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+      _updateIsAtBottom();
+    }
+    _maybeTriggerLoadMore();
   }
 
   @override
@@ -308,9 +343,7 @@ class _MessageListState extends State<_MessageList> {
     // `state.rows` is only non-empty when an anchor exists (see the
     // early-return above).
     final anchorId = vm.anchorOf(state.id);
-    final anchorIndex = state.rows.indexWhere(
-      (r) => r.message.id == anchorId,
-    );
+    final anchorIndex = state.rows.indexWhere((r) => r.message.id == anchorId);
     assert(
       anchorIndex != -1,
       'persisted anchor $anchorId missing from derived branch',
@@ -358,8 +391,12 @@ class _MessageListState extends State<_MessageList> {
                           : state.topMarker),
                 stitchCount: state.topStitchCount,
                 errorMessage: state.topError,
-                onLoadStitches: () => vm.loadStitchAbove(state.id),
-                onRetry: () => vm.loadStitchAbove(state.id),
+                onLoadStitches: () => vm.revealStitch(
+                  state.id,
+                  state.rows.first.message.id,
+                  Direction.incoming,
+                ),
+                onRetry: () => vm.extendAbove(state.id),
               ),
             ]),
           ),
@@ -399,8 +436,12 @@ class _MessageListState extends State<_MessageList> {
                           : state.bottomMarker),
                 stitchCount: state.bottomStitchCount,
                 errorMessage: state.bottomError,
-                onLoadStitches: () => vm.loadStitchBelow(state.id),
-                onRetry: () => vm.loadStitchBelow(state.id),
+                onLoadStitches: () => vm.revealStitch(
+                  state.id,
+                  state.rows.last.message.id,
+                  Direction.outgoing,
+                ),
+                onRetry: () => vm.extendBelow(state.id),
               ),
             ]),
           ),
@@ -475,7 +516,8 @@ class _MessageRow extends StatelessWidget {
         enabled: canPrev,
         loading: false,
         isStitch: prevIsStitch,
-        onPressed: () => vm.navigateOutgoing(columnId, anchorId, forward: false),
+        onPressed: () =>
+            vm.navigateOutgoing(columnId, anchorId, forward: false),
         tooltip: 'Previous',
       );
 

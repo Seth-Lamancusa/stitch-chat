@@ -5,6 +5,7 @@ import 'package:stitch_chat/data/models/message.dart';
 import 'package:stitch_chat/data/repositories/column_repository.dart';
 import 'package:stitch_chat/data/services/local_identity_service.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 import 'package:stitch_chat/ui/columns/columns_view.dart';
 import 'package:stitch_chat/ui/columns/columns_viewmodel.dart';
 import 'package:stitch_chat/ui/core/theme/app_theme.dart';
@@ -27,9 +28,16 @@ class InMemoryColumnRepository implements ColumnRepository {
   int _n = 0;
 
   @override
-  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({
+    String? anchorMessageId,
+    double? width,
+  }) async {
     final id = 'longcolid-${_n++}';
-    final meta = ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
+    final meta = ColumnMeta(
+      id: id,
+      anchorMessageId: anchorMessageId,
+      width: width,
+    );
     _columns[id] = meta;
     return meta;
   }
@@ -47,13 +55,21 @@ class InMemoryColumnRepository implements ColumnRepository {
   @override
   Future<void> updateColumnWidth(String id, double? width) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: existing.anchorMessageId, width: width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: width,
+    );
   }
 
   @override
   Future<void> updateColumnAnchor(String id, String anchorMessageId) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: anchorMessageId, width: existing.width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: anchorMessageId,
+      width: existing.width,
+    );
   }
 
   @override
@@ -68,7 +84,11 @@ class InMemoryColumnRepository implements ColumnRepository {
   }
 
   @override
-  Future<void> setBranchPointer(String columnId, String parentId, String childId) async {
+  Future<void> setBranchPointer(
+    String columnId,
+    String parentId,
+    String childId,
+  ) async {
     (_visibleOutgoing[columnId] ??= {})[parentId] = childId;
     (_visibleIncoming[columnId] ??= {})[childId] = parentId;
   }
@@ -82,17 +102,30 @@ class InMemoryColumnRepository implements ColumnRepository {
       _visibleIncoming[columnId]?[messageId];
 
   @override
-  Future<void> setVisibleIncoming(String columnId, String childId, String newParentId) async {
+  Future<void> setVisibleIncoming(
+    String columnId,
+    String childId,
+    String newParentId,
+  ) async {
     (_visibleIncoming[columnId] ??= {})[childId] = newParentId;
   }
 }
 
 void main() {
-  testWidgets('scroll position is preserved when switching columns', (tester) async {
+  testWidgets('scroll position is preserved when switching columns', (
+    tester,
+  ) async {
     final messages = FakeMessageRepository();
     final columns = InMemoryColumnRepository();
-    final branchPathService = BranchPathService(messages, columns);
-    final vm = ColumnsViewModel(messages, columns, branchPathService, FakeIdentityService());
+    final store = MessageStore(messages);
+    final branchPathService = BranchPathService(messages, columns, store);
+    final vm = ColumnsViewModel(
+      messages,
+      columns,
+      branchPathService,
+      store,
+      FakeIdentityService(),
+    );
 
     // Seed column A with many messages so it's scrollable.
     String? prevA;
@@ -134,14 +167,24 @@ void main() {
     // (the last/bottom message), so dragging toward older content — which
     // lives in the before-anchor sliver — moves `pixels` negative, not
     // positive as it would in the old `reverse: true` ListView.
-    final offsetAfterScroll = tester.state<ScrollableState>(scrollableFinder.first).position.pixels;
+    final offsetAfterScroll = tester
+        .state<ScrollableState>(scrollableFinder.first)
+        .position
+        .pixels;
     expect(offsetAfterScroll, lessThan(0));
 
     await tester.tap(find.byKey(ValueKey(colB.id)).first);
     await tester.pumpAndSettle();
 
-    final offsetAfterSwitch = tester.state<ScrollableState>(scrollableFinder.first).position.pixels;
-    expect(offsetAfterSwitch, offsetAfterScroll,
-        reason: 'Switching the active column must not move column A\'s scroll position');
+    final offsetAfterSwitch = tester
+        .state<ScrollableState>(scrollableFinder.first)
+        .position
+        .pixels;
+    expect(
+      offsetAfterSwitch,
+      offsetAfterScroll,
+      reason:
+          'Switching the active column must not move column A\'s scroll position',
+    );
   });
 }

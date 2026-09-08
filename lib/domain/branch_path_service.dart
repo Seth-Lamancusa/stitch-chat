@@ -1,46 +1,180 @@
 import '../data/models/message.dart';
 import '../data/repositories/column_repository.dart';
 import '../data/repositories/message_repository.dart';
+import 'message_store.dart';
 
-/// Derives and updates the linear thread a column shows, per the message
-/// data model doc's "derived, not stored" rule: a column's rendered thread
-/// is computed by walking out from an anchor message — up via reply
-/// ancestry, down via each column's persisted branch pointers — not stored
-/// as its own list anywhere.
+/// Which edge direction a boundary operation targets: `incoming` walks
+/// upward (ancestors, the top of a column), `outgoing` walks downward
+/// (descendants, the bottom) — matches `ColumnUiState.topLoading`/
+/// `bottomLoading` naming throughout (incoming = top, outgoing = bottom).
+enum Direction { incoming, outgoing }
 
+/// The reply-candidate/stitch-candidate split at one boundary message, in
+/// one direction. [replyCandidate] is the single default-eligible reply
+/// child/parent (most-recent for outgoing, the 0-1 reply parent for
+/// incoming); [stitchCandidates] is never auto-followed — see
+/// `docs/plans/message-loading-plan.md` §4a/§4b.
+typedef BoundaryCandidates = ({
+  Message? replyCandidate,
+  List<Message> stitchCandidates,
+});
+
+/// Pure resolution and reads over the conversation tree + a column's
+/// persisted branch pointers. Per `docs/plans/message-loading-plan.md`, this
+/// class never mutates `ColumnUiState` or calls `notifyListeners` — that
+/// orchestration (loading markers, persistence choreography) lives in
+/// `ColumnsViewModel`. This class answers "what's the next candidate?" and
+/// "what does the column currently show?"; it never decides to load more.
 class BranchPathService {
-  BranchPathService(this._messages, this._columns);
+  BranchPathService(this._messages, this._columns, this._store);
 
   final MessageRepository _messages;
   final ColumnRepository _columns;
+  final MessageStore _store;
 
-  /// The full thread [columnId] shows around [anchorMessageId]: ancestors
-  /// above it (via persisted visible-incoming pointers, falling back to
-  /// reply structure), then the anchor, then its persisted-or-defaulted
-  /// branch below. Returns an empty list if [anchorMessageId] doesn't exist.
-  Future<List<Message>> getFullVisibleBranch(String columnId, String anchorMessageId) async {
-    final anchor = await _messages.getMessage(anchorMessageId);
+  /// [columnId]'s currently-materialized branch around [anchorMessageId]:
+  /// walks `ColumnBranchPointers` only, both directions, stopping at the
+  /// first unset pointer in each direction. No resolution logic, no
+  /// fallback, no writes — a pure pointer read. Returns an empty list if
+  /// [anchorMessageId] doesn't exist.
+  Future<List<Message>> materializedTrajectory(
+    String columnId,
+    String anchorMessageId,
+  ) async {
+    final anchor = await _store.load(anchorMessageId);
     if (anchor == null) return const [];
 
     final above = <Message>[];
-    var current = anchor;
+    var currentId = anchorMessageId;
     while (true) {
-      final incoming = await _visibleOrStructuralIncoming(columnId, current.id);
-      if (incoming == null) break;
-      above.insert(0, incoming);
-      current = incoming;
+      final parentId = await _columns.getVisibleIncoming(columnId, currentId);
+      if (parentId == null) break;
+      final parent = await _store.load(parentId);
+      if (parent == null) break;
+      above.insert(0, parent);
+      currentId = parentId;
     }
 
     final below = <Message>[anchor];
-    current = anchor;
+    currentId = anchorMessageId;
     while (true) {
-      final next = await _visibleOrDefaultOutgoing(columnId, current.id);
-      if (next == null) break;
-      below.add(next);
-      current = next;
+      final childId = await _columns.getVisibleOutgoing(columnId, currentId);
+      if (childId == null) break;
+      final child = await _store.load(childId);
+      if (child == null) break;
+      below.add(child);
+      currentId = childId;
     }
 
     return [...above, ...below];
+  }
+
+  /// The reply/stitch candidate pools at [boundaryId] in [direction] — one
+  /// `getOutgoing`/`getIncoming` call, split into the single default-eligible
+  /// reply candidate and the stitch pool. Shared by [resolveDefaultCandidate],
+  /// [resolveForcedStitchCandidate], and the column marker/stitch-count
+  /// computation in `ColumnsViewModel._refresh`.
+  Future<BoundaryCandidates> candidatesAt(
+    String boundaryId,
+    Direction direction,
+  ) async {
+    if (direction == Direction.outgoing) {
+      final outgoing = await _messages.getOutgoing(boundaryId);
+      return (
+        replyCandidate: outgoing.replyOutgoing.isEmpty
+            ? null
+            : _mostRecentOf(outgoing.replyOutgoing),
+        stitchCandidates: outgoing.stitchedOutgoing,
+      );
+    }
+    final incoming = await _messages.getIncoming(boundaryId);
+    return (
+      replyCandidate: incoming.replyIncoming.isEmpty
+          ? null
+          : incoming.replyIncoming.first,
+      stitchCandidates: incoming.stitchedIncoming,
+    );
+  }
+
+  /// The automatic default candidate at an unset [boundaryId] boundary:
+  /// reply-only, most-recent. **Never** considers stitch candidates — an
+  /// unset fork should never silently auto-follow into stitch-linked
+  /// content (Surgical Loading).
+  Future<Message?> resolveDefaultCandidate(
+    String boundaryId,
+    Direction direction,
+  ) async {
+    return (await candidatesAt(boundaryId, direction)).replyCandidate;
+  }
+
+  /// The forced-stitch candidate for a "Load stitches" action at
+  /// [boundaryId]: the first stitch candidate, regardless of load state —
+  /// Surgical Loading has no load-state exception, the click is always
+  /// required at a stitch boundary.
+  Future<Message?> resolveForcedStitchCandidate(
+    String boundaryId,
+    Direction direction,
+  ) async {
+    final stitches = (await candidatesAt(
+      boundaryId,
+      direction,
+    )).stitchCandidates;
+    return stitches.isEmpty ? null : stitches.first;
+  }
+
+  /// The next/previous candidate id in [columnId]'s outgoing pool below
+  /// [parentId] (reply children first, then stitch children — the full
+  /// combined pool: an explicit switch is user-driven and allowed to cross
+  /// into stitch-linked content, unlike automatic default selection).
+  /// Clamps at either end rather than wrapping. Pure read — no persistence.
+  Future<String?> resolveExplicitOutgoing(
+    String columnId,
+    String parentId, {
+    required bool forward,
+  }) async {
+    final candidates = (await _messages.getOutgoing(parentId)).all;
+    if (candidates.isEmpty) return null;
+
+    final currentChildId = await _columns.getVisibleOutgoing(
+      columnId,
+      parentId,
+    );
+    final currentIndex = candidates.indexWhere((m) => m.id == currentChildId);
+
+    final nextIndex = currentIndex == -1
+        ? (forward ? 0 : candidates.length - 1)
+        : (forward ? currentIndex + 1 : currentIndex - 1).clamp(
+            0,
+            candidates.length - 1,
+          );
+
+    return candidates[nextIndex].id;
+  }
+
+  /// Mirrors [resolveExplicitOutgoing] for the incoming pool above
+  /// [childId] (reply parent first, then stitch parents).
+  Future<String?> resolveExplicitIncoming(
+    String columnId,
+    String childId, {
+    required bool forward,
+  }) async {
+    final candidates = (await _messages.getIncoming(childId)).all;
+    if (candidates.isEmpty) return null;
+
+    final currentParentId = await _columns.getVisibleIncoming(
+      columnId,
+      childId,
+    );
+    final currentIndex = candidates.indexWhere((m) => m.id == currentParentId);
+
+    final nextIndex = currentIndex == -1
+        ? (forward ? 0 : candidates.length - 1)
+        : (forward ? currentIndex + 1 : currentIndex - 1).clamp(
+            0,
+            candidates.length - 1,
+          );
+
+    return candidates[nextIndex].id;
   }
 
   /// Descends via the most-recent immediate child at each fork (no
@@ -59,107 +193,12 @@ class BranchPathService {
     }
   }
 
-  /// Moves [columnId]'s visible outgoing message below [parentId] to the
-  /// next/previous candidate in `getOutgoing(parentId)` (reply children
-  /// first, then stitch children — deliberately the full combined pool:
-  /// unlike automatic default-path selection, an explicit outgoing switch is
-  /// a user-driven action allowed to cross into stitch-linked content).
-  /// Clamps at either end rather than wrapping. Re-derives everything below
-  /// the switch point, since the old branch below it no longer applies.
-  Future<List<Message>> navigateOutgoing(
-    String columnId,
-    String parentId, {
-    required bool forward,
-  }) async {
-    final candidates = (await _messages.getOutgoing(parentId)).all;
-    if (candidates.isEmpty) {
-      return getFullVisibleBranch(columnId, parentId);
-    }
-
-    final currentChildId = await _columns.getVisibleOutgoing(columnId, parentId);
-    final currentIndex = candidates.indexWhere((m) => m.id == currentChildId);
-
-    int nextIndex;
-    if (currentIndex == -1) {
-      nextIndex = forward ? 0 : candidates.length - 1;
-    } else {
-      nextIndex = (forward ? currentIndex + 1 : currentIndex - 1)
-          .clamp(0, candidates.length - 1);
-    }
-
-    final chosen = candidates[nextIndex];
-    await _columns.setBranchPointer(columnId, parentId, chosen.id);
-    return getFullVisibleBranch(columnId, chosen.id);
-  }
-
-  /// Moves [columnId]'s visible incoming message above [childId] to the
-  /// next/previous candidate in `getIncoming(childId)` (reply parent first,
-  /// then stitch parents — same "explicit switch sees the full pool" rule as
-  /// [navigateOutgoing], mirrored upward). Clamps at either end. Re-derives
-  /// everything above the switch point, since the old ancestry no longer
-  /// applies once the incoming pointer changes.
-  Future<List<Message>> navigateIncoming(
-    String columnId,
-    String childId, {
-    required bool forward,
-  }) async {
-    final candidates = (await _messages.getIncoming(childId)).all;
-    if (candidates.isEmpty) {
-      return getFullVisibleBranch(columnId, childId);
-    }
-
-    final currentParentId = await _columns.getVisibleIncoming(columnId, childId);
-    final currentIndex = candidates.indexWhere((m) => m.id == currentParentId);
-
-    int nextIndex;
-    if (currentIndex == -1) {
-      nextIndex = forward ? 0 : candidates.length - 1;
-    } else {
-      nextIndex = (forward ? currentIndex + 1 : currentIndex - 1)
-          .clamp(0, candidates.length - 1);
-    }
-
-    final chosen = candidates[nextIndex];
-    await _columns.setVisibleIncoming(columnId, childId, chosen.id);
-    return getFullVisibleBranch(columnId, childId);
-  }
-
-  Future<Message?> _visibleOrStructuralIncoming(String columnId, String childId) async {
-    final visibleParentId = await _columns.getVisibleIncoming(columnId, childId);
-    if (visibleParentId != null) {
-      return _messages.getMessage(visibleParentId);
-    }
-
-    // Never visited from this column: fall back to the reply-structural
-    // parent (the only parent that exists before any pointer has been set).
-    final ancestry = await _messages.getAncestorPath(childId);
-    if (ancestry.length < 2) return null; // childId is already a reply-root
-    return ancestry[ancestry.length - 2];
-  }
-
-  Future<Message?> _visibleOrDefaultOutgoing(String columnId, String parentId) async {
-    final visibleChildId = await _columns.getVisibleOutgoing(columnId, parentId);
-    if (visibleChildId != null) {
-      return _messages.getMessage(visibleChildId);
-    }
-
-    // Unset fork: default to the most recent *reply* child only, and
-    // persist the choice. Reply-only (not the combined reply+stitch pool)
-    // per the data model doc's "Surgical Loading" principle — an unset fork
-    // should never silently auto-follow into stitch-linked content; that's
-    // an explicit "Load stitches" action at the boundary marker instead.
-    final replyOutgoing = (await _messages.getOutgoing(parentId)).replyOutgoing;
-    if (replyOutgoing.isEmpty) return null;
-
-    final chosen = _mostRecentOf(replyOutgoing);
-    await _columns.setBranchPointer(columnId, parentId, chosen.id);
-    return chosen;
-  }
-
   Message _mostRecentOf(List<Message> messages) {
     return messages.reduce(
-      (a, b) => (b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0))
-              .isAfter(a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+      (a, b) =>
+          (b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0)).isAfter(
+            a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+          )
           ? b
           : a,
     );
