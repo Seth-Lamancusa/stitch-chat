@@ -86,6 +86,9 @@ class FakeMessageRepository implements MessageRepository {
   ) async {}
 
   @override
+  Future<List<RecipientRef>> getRecipients(String messageId) async => const [];
+
+  @override
   Future<void> deleteMessage(String id) async => _messages.remove(id);
 }
 
@@ -147,6 +150,18 @@ class FakeColumnRepository implements ColumnRepository {
       anchorMessageId: existing.anchorMessageId,
       width: existing.width,
       scrollOffset: scrollOffset,
+    );
+  }
+
+  @override
+  Future<void> updateColumnCwd(String id, String? cwd) async {
+    final existing = _columns[id]!;
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: existing.width,
+      scrollOffset: existing.scrollOffset,
+      cwd: cwd,
     );
   }
 

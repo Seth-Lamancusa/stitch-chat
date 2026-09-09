@@ -84,6 +84,18 @@ class InMemoryColumnRepository implements ColumnRepository {
   }
 
   @override
+  Future<void> updateColumnCwd(String id, String? cwd) async {
+    final existing = _columns[id]!;
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: existing.width,
+      scrollOffset: existing.scrollOffset,
+      cwd: cwd,
+    );
+  }
+
+  @override
   Future<void> setBranchPointer(
     String columnId,
     String parentId,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../../data/models/message.dart';
 
@@ -161,6 +162,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   onExit: (_) => _exitMenu(),
                   child: _MessageActionMenu(
                     content: message.content,
+                    messageId: message.id,
                     onReply: widget.onReply,
                     onMoreMenuOpenChanged: _setMoreMenuOpen,
                   ),
@@ -197,7 +199,12 @@ class _MessageBubbleState extends State<_MessageBubble> {
                       ),
                     ),
                   ),
-                Text(message.content.isEmpty ? '…' : message.content),
+                SelectionArea(
+                  child: MarkdownBody(
+                    data: message.content.isEmpty ? '…' : message.content,
+                    selectable: false,
+                  ),
+                ),
               ],
             ),
           ),
@@ -252,9 +259,15 @@ class _HoverLabel extends StatelessWidget {
 /// Hover toolbar for a message, floating over the bottom border of the card
 /// and right-aligned.
 class _MessageActionMenu extends StatelessWidget {
-  const _MessageActionMenu({required this.content, this.onReply, required this.onMoreMenuOpenChanged});
+  const _MessageActionMenu({
+    required this.content,
+    required this.messageId,
+    this.onReply,
+    required this.onMoreMenuOpenChanged,
+  });
 
   final String content;
+  final String messageId;
   final VoidCallback? onReply;
   final ValueChanged<bool> onMoreMenuOpenChanged;
 
@@ -275,7 +288,7 @@ class _MessageActionMenu extends StatelessWidget {
           children: [
             _MessageActionButton(icon: Icons.reply, tooltip: 'Reply', onPressed: onReply),
             _CopyButton(content: content),
-            _MoreActionButton(onOpenChanged: onMoreMenuOpenChanged),
+            _MoreActionButton(messageId: messageId, onOpenChanged: onMoreMenuOpenChanged),
           ],
         ),
       ),
@@ -389,11 +402,11 @@ class _CopyButtonState extends State<_CopyButton> {
   }
 }
 
-/// Contextual "more actions" menu. Items are placeholders so the dropdown
-/// styling can be nailed down before real actions exist.
+/// Contextual "more actions" menu.
 class _MoreActionButton extends StatefulWidget {
-  const _MoreActionButton({required this.onOpenChanged});
+  const _MoreActionButton({required this.messageId, required this.onOpenChanged});
 
+  final String messageId;
   final ValueChanged<bool> onOpenChanged;
 
   @override
@@ -401,7 +414,10 @@ class _MoreActionButton extends StatefulWidget {
 }
 
 class _MoreActionButtonState extends State<_MoreActionButton> {
+  static const _copyIdValue = 'copy-message-id';
+
   bool _isHovered = false;
+  bool _justCopiedId = false;
 
   // showMenu (rather than PopupMenuButton) so opening/closing can be
   // observed directly via the returned future — PopupMenuButton exposes
@@ -417,18 +433,41 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
       Offset.zero & overlay.size,
     );
     try {
-      await showMenu<String>(
+      // PopupMenuItem pops the menu route as soon as its onTap returns, so
+      // the copy itself happens here (before the pop) rather than after
+      // showMenu resolves — the "Copied!" feedback below plays out on the
+      // trigger button instead, once the menu is already closed.
+      final selected = await showMenu<String>(
         context: context,
         position: position,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(6),
           side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
         ),
-        items: const [
-          PopupMenuItem(value: 'placeholder-1', child: Text('Placeholder')),
-          PopupMenuItem(value: 'placeholder-2', child: Text('Placeholder')),
+        items: [
+          PopupMenuItem(
+            value: _copyIdValue,
+            onTap: () => Clipboard.setData(ClipboardData(text: widget.messageId)),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.badge_outlined, size: 14),
+                const SizedBox(width: 8),
+                // Fixed width + ellipsis so a long id can't stretch the menu.
+                SizedBox(
+                  width: 140,
+                  child: Text('ID: ${widget.messageId}', overflow: TextOverflow.ellipsis, maxLines: 1),
+                ),
+              ],
+            ),
+          ),
         ],
       );
+      if (selected == _copyIdValue && mounted) {
+        setState(() => _justCopiedId = true);
+        await Future.delayed(const Duration(seconds: 1));
+        if (mounted) setState(() => _justCopiedId = false);
+      }
     } finally {
       if (mounted) widget.onOpenChanged(false);
     }
@@ -439,8 +478,8 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
     final onSurface = Theme.of(context).colorScheme.onSurface;
 
     return _HoverLabel(
-      message: 'More',
-      visible: _isHovered,
+      message: _justCopiedId ? 'Copied!' : 'More',
+      visible: _isHovered || _justCopiedId,
       child: MouseRegion(
         onEnter: (_) => setState(() => _isHovered = true),
         onExit: (_) => setState(() => _isHovered = false),
@@ -457,7 +496,11 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
               borderRadius: BorderRadius.circular(4),
               onTap: () => _openMenu(context),
               child: Center(
-                child: Icon(Icons.more_horiz, size: 14, color: onSurface.withValues(alpha: 0.7)),
+                child: Icon(
+                  _justCopiedId ? Icons.check : Icons.more_horiz,
+                  size: 14,
+                  color: _justCopiedId ? Colors.green : onSurface.withValues(alpha: 0.7),
+                ),
               ),
             ),
           ),

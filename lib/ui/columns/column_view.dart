@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/logging/stitch_log.dart';
 import '../../data/models/message.dart';
 import '../../domain/branch_path_service.dart' show Direction;
 import '../core/adaptive_marker.dart';
@@ -12,6 +13,15 @@ import '../core/outgoing_navigator.dart' show OutgoingNavArrow;
 import '../core/theme/app_colors.dart';
 import 'column_ui_state.dart';
 import 'columns_viewmodel.dart';
+
+/// Vertical gap between consecutive message rows in the list. Shared by
+/// every row-to-row boundary — including the center-anchored sliver's
+/// boundary with its neighbors, which (due to `CustomScrollView.center`
+/// reversing growth direction on the `beforeRows` side) can't reuse the
+/// plain inter-row `SizedBox` and instead needs this same value applied
+/// as `SliverPadding` inset. Keep every boundary below wired to this one
+/// constant rather than a repeated literal.
+const double _kMessageRowGap = 2.0;
 
 /// One column: header, message list with navigators/markers, composer.
 /// Absorbs the old `ChatView`'s bubble rendering and composer, scoped to a
@@ -31,10 +41,25 @@ class _ColumnViewState extends State<ColumnView> {
   final _messageListKey = GlobalKey<_MessageListState>();
 
   @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onDraftChanged);
+  }
+
+  @override
   void dispose() {
+    _controller.removeListener(_onDraftChanged);
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  void _onDraftChanged() {
+    if (!mounted) return;
+    context.read<ColumnsViewModel>().onComposerDraftChanged(
+          widget.state.id,
+          _controller.text,
+        );
   }
 
   void _send(ColumnsViewModel vm) {
@@ -92,6 +117,8 @@ class _ColumnViewState extends State<ColumnView> {
                         focusNode: _focusNode,
                         replyTarget: replyTarget,
                         onCancelReply: () => vm.setReplyTarget(state.id, null),
+                        cwdWarningBotIds: state.cwdWarningBotIds,
+                        cwdWarningPhase: state.cwdWarningPhase,
                       ),
                     ),
                 ],
@@ -110,16 +137,52 @@ class _Header extends StatelessWidget {
   final ColumnUiState state;
   final VoidCallback onClose;
 
+  Future<void> _editCwd(BuildContext context) async {
+    final vm = context.read<ColumnsViewModel>();
+    final controller = TextEditingController(text: state.cwd ?? '');
+    final next = await showDialog<String?>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Column cwd'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'Filesystem path for agent runtimes',
+            ),
+            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    if (next == null) return;
+    await vm.updateColumnCwd(state.id, next);
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final headerColor = state.isActive
         ? context.appColors.columnHeaderSurfaceSelected
         : context.appColors.columnHeaderSurface;
+    final cwd = state.cwd;
+    final hasCwd = cwd != null && cwd.isNotEmpty;
 
     return Container(
       height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
         color: headerColor,
         border: Border(bottom: BorderSide(color: colorScheme.outlineVariant)),
@@ -127,28 +190,39 @@ class _Header extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text.rich(
-              TextSpan(
-                style: const TextStyle(
-                  fontStyle: FontStyle.italic,
-                  fontSize: 14,
-                ),
-                children: [
-                  const TextSpan(
-                    text: 'New column ',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+            child: Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Text.rich(
+                TextSpan(
+                  style: const TextStyle(
+                    fontStyle: FontStyle.italic,
+                    fontSize: 14,
                   ),
-                  TextSpan(
-                    text: '(${state.id.substring(0, 8)})',
-                    style: TextStyle(
-                      fontWeight: FontWeight.normal,
-                      color: colorScheme.onSurface.withValues(alpha: 0.7),
+                  children: [
+                    const TextSpan(
+                      text: 'New column ',
+                      style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                  ),
-                ],
+                    TextSpan(
+                      text: '(${state.id.substring(0, 8)})',
+                      style: TextStyle(
+                        fontWeight: FontWeight.normal,
+                        color: colorScheme.onSurface.withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ],
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
-              overflow: TextOverflow.ellipsis,
             ),
+          ),
+          IconButton(
+            tooltip: hasCwd ? cwd : 'Set column cwd',
+            icon: Icon(
+              hasCwd ? Icons.folder : Icons.folder_outlined,
+              size: 18,
+            ),
+            onPressed: () => _editCwd(context),
           ),
           IconButton(
             icon: const Icon(Icons.close, size: 18),
@@ -365,12 +439,20 @@ class _MessageListState extends State<_MessageList> {
     final centerRow = state.rows[anchorIndex];
     final afterRows = state.rows.sublist(anchorIndex + 1);
 
+    final centerGapAbove = beforeRows.isNotEmpty ? _kMessageRowGap : 0.0;
+    final centerGapBelow = afterRows.isNotEmpty ? _kMessageRowGap : 0.0;
+    StitchLog.hop(
+      'dart.column',
+      'center row spacing id=${centerRow.message.id} '
+      'gapAbove=$centerGapAbove gapBelow=$centerGapBelow',
+    );
+
     return CustomScrollView(
       controller: _scrollController,
       center: _centerKey,
       slivers: [
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+          padding: EdgeInsets.fromLTRB(12, 12, 12, centerGapAbove),
           sliver: SliverList(
             delegate: SliverChildListDelegate([
               for (int i = 0; i < beforeRows.length; i++) ...[
@@ -380,7 +462,7 @@ class _MessageListState extends State<_MessageList> {
                   row: beforeRows[i],
                   showAuthor: showAuthorById[beforeRows[i].message.id]!,
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: _kMessageRowGap),
               ],
               AdaptiveMarker(
                 isTop: true,
@@ -417,7 +499,7 @@ class _MessageListState extends State<_MessageList> {
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 70),
           sliver: SliverList(
             delegate: SliverChildListDelegate([
-              if (afterRows.isNotEmpty) const SizedBox(height: 4),
+              if (afterRows.isNotEmpty) const SizedBox(height: _kMessageRowGap),
               for (int i = 0; i < afterRows.length; i++) ...[
                 _MessageRow(
                   key: ValueKey(afterRows[i].message.id),
@@ -425,7 +507,8 @@ class _MessageListState extends State<_MessageList> {
                   row: afterRows[i],
                   showAuthor: showAuthorById[afterRows[i].message.id]!,
                 ),
-                if (i < afterRows.length - 1) const SizedBox(height: 4),
+                if (i < afterRows.length - 1)
+                  const SizedBox(height: _kMessageRowGap),
               ],
               AdaptiveMarker(
                 isTop: false,
@@ -472,6 +555,13 @@ class _MessageRow extends StatelessWidget {
     final isMe =
         row.message.authorId != null &&
         row.message.authorId == vm.currentUserId;
+
+    if (showAuthor) {
+      StitchLog.hop(
+        'dart.column',
+        'author label spacing id=${row.message.id} rowGap=6 labelBottom=4',
+      );
+    }
 
     // Author label
     final authorLabel = Padding(
@@ -556,7 +646,7 @@ class _MessageRow extends StatelessWidget {
             // same-author run.
             if (showAuthor)
               Padding(
-                padding: const EdgeInsets.only(left: 20, right: 20, bottom: 2),
+                padding: const EdgeInsets.only(left: 22, right: 22),
                 child: authorLabel,
               ),
             // Message bubble row with nav buttons
@@ -567,9 +657,9 @@ class _MessageRow extends StatelessWidget {
                     width: 20,
                     child: leftNav != null ? Center(child: leftNav) : null,
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 2),
                   Expanded(child: bubble),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 2),
                   SizedBox(
                     width: 20,
                     child: rightNav != null ? Center(child: rightNav) : null,
@@ -603,6 +693,8 @@ class _Composer extends StatelessWidget {
     required this.focusNode,
     this.replyTarget,
     this.onCancelReply,
+    this.cwdWarningBotIds = const [],
+    this.cwdWarningPhase = CwdWarningPhase.none,
   });
 
   final TextEditingController controller;
@@ -614,6 +706,8 @@ class _Composer extends StatelessWidget {
   /// dismissable indicator above the input.
   final Message? replyTarget;
   final VoidCallback? onCancelReply;
+  final List<String> cwdWarningBotIds;
+  final CwdWarningPhase cwdWarningPhase;
 
   @override
   Widget build(BuildContext context) {
@@ -631,6 +725,10 @@ class _Composer extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _CwdWarningBanner(
+            botIds: cwdWarningBotIds,
+            phase: cwdWarningPhase,
+          ),
           if (replyTarget != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
@@ -677,7 +775,7 @@ class _Composer extends StatelessWidget {
                     controller: controller,
                     focusNode: focusNode,
                     decoration: const InputDecoration(
-                      hintText: 'Say something...',
+                      hintText: 'Say something…',
                       border: InputBorder.none,
                       isDense: true,
                       contentPadding: EdgeInsets.symmetric(
@@ -704,5 +802,95 @@ class _Composer extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Keeps the last warning copy visible while opacity animates out.
+class _CwdWarningBanner extends StatefulWidget {
+  const _CwdWarningBanner({
+    required this.botIds,
+    required this.phase,
+  });
+
+  final List<String> botIds;
+  final CwdWarningPhase phase;
+
+  @override
+  State<_CwdWarningBanner> createState() => _CwdWarningBannerState();
+}
+
+class _CwdWarningBannerState extends State<_CwdWarningBanner> {
+  List<String> _botIds = const [];
+  CwdWarningPhase _phase = CwdWarningPhase.none;
+  double _opacity = 0;
+
+  @override
+  void didUpdateWidget(covariant _CwdWarningBanner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.phase != CwdWarningPhase.none && widget.botIds.isNotEmpty) {
+      setState(() {
+        _botIds = widget.botIds;
+        _phase = widget.phase;
+        _opacity = 1;
+      });
+    } else if (widget.phase == CwdWarningPhase.none && _opacity > 0) {
+      setState(() => _opacity = 0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_phase == CwdWarningPhase.none && _opacity == 0) {
+      return const SizedBox.shrink();
+    }
+    final colorScheme = Theme.of(context).colorScheme;
+    return AnimatedOpacity(
+      opacity: _opacity,
+      duration: const Duration(milliseconds: 400),
+      onEnd: () {
+        if (_opacity == 0 && mounted) {
+          setState(() {
+            _phase = CwdWarningPhase.none;
+            _botIds = const [];
+          });
+        }
+      },
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.warning_amber_outlined,
+              size: 14,
+              color: colorScheme.tertiary,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _cwdWarningText(_botIds, _phase),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _cwdWarningText(List<String> botIds, CwdWarningPhase phase) {
+    final tags = botIds.map((id) => '@$id').join(', ');
+    final plural = botIds.length > 1;
+    return switch (phase) {
+      CwdWarningPhase.advisory =>
+        '$tags won\'t respond unless you set a cwd on this column.',
+      CwdWarningPhase.sent => plural
+          ? '$tags aren\'t going to respond.'
+          : '$tags isn\'t going to respond.',
+      CwdWarningPhase.none => '',
+    };
   }
 }

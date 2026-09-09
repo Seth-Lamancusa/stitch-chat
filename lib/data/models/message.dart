@@ -8,6 +8,15 @@ enum MessageRole { user, localBot, functionCall, functionResult }
 /// Who a message is addressed to, for [MessageRepository.addRecipientEdge].
 enum RecipientKind { localBot, cloudUser }
 
+/// One existing recipient edge on a message, as returned by
+/// [MessageRepository.getRecipients].
+class RecipientRef {
+  final String recipientId;
+  final RecipientKind kind;
+
+  const RecipientRef({required this.recipientId, required this.kind});
+}
+
 class Message {
   final String id;
   final MessageRole role;

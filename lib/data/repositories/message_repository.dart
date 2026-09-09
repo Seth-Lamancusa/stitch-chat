@@ -50,5 +50,9 @@ abstract class MessageRepository {
 
   Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind);
 
+  /// Existing recipient edges on [messageId] — used to inherit a parent
+  /// message's addressees onto a reply.
+  Future<List<RecipientRef>> getRecipients(String messageId);
+
   Future<void> deleteMessage(String id);
 }
