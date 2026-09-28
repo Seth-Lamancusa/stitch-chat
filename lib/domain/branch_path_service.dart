@@ -193,6 +193,66 @@ class BranchPathService {
     }
   }
 
+  /// Whether [childId] is (or will be) the visible outgoing under [parentId]
+  /// in [columnId] — the stitch-frontend `parent.branch_child === id` check.
+  ///
+  /// An unset pointer counts as on-path only for the default non-hidden
+  /// reply pick (most recent). Hidden-only children are never on-path until
+  /// an explicit reveal / sibling navigation sets a pointer.
+  Future<bool> isNextOnVisibleOutgoing(
+    String columnId,
+    String parentId,
+    String childId,
+  ) async {
+    final visibleChildId = await _columns.getVisibleOutgoing(columnId, parentId);
+    if (visibleChildId != null) return visibleChildId == childId;
+
+    final replyOutgoing = (await _messages.getOutgoing(parentId)).replyOutgoing;
+    if (replyOutgoing.isEmpty) return false;
+    return _mostRecentOf(replyOutgoing).id == childId;
+  }
+
+  /// Full reply-tree id set for the thread [anchorMessageId] sits in: walk
+  /// up to the reply root, then BFS every reply descendant (all forks, not
+  /// just the visible branch). Stitch edges are ignored.
+  Future<Set<String>> replyTreeIds(String anchorMessageId) async {
+    final ancestry = await _messages.getAncestorPath(anchorMessageId);
+    if (ancestry.isEmpty) return {};
+
+    final rootId = ancestry.first.id;
+    final ids = <String>{rootId};
+    final queue = <String>[rootId];
+    while (queue.isNotEmpty) {
+      final parentId = queue.removeAt(0);
+      // Structural reply tree includes hidden edges — only stitch is excluded.
+      final outgoing = await _messages.getOutgoing(parentId);
+      for (final child in [
+        ...outgoing.replyOutgoing,
+        ...outgoing.hiddenReplyOutgoing,
+      ]) {
+        if (ids.add(child.id)) {
+          queue.add(child.id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  /// Whether a new reply [childId] under [parentId] would show on
+  /// [columnId]'s currently materialized branch around [anchorMessageId]:
+  /// the parent must already be on that branch, and [childId] must be (or
+  /// become) the selected outgoing under it.
+  Future<bool> wouldLandOnVisibleBranch(
+    String columnId,
+    String anchorMessageId,
+    String parentId,
+    String childId,
+  ) async {
+    final visible = await materializedTrajectory(columnId, anchorMessageId);
+    if (!visible.any((m) => m.id == parentId)) return false;
+    return isNextOnVisibleOutgoing(columnId, parentId, childId);
+  }
+
   Message _mostRecentOf(List<Message> messages) {
     return messages.reduce(
       (a, b) =>

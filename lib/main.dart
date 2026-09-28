@@ -10,15 +10,25 @@ import 'core/logging/stitch_log.dart';
 import 'core/notifications/notification_overlay.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/settings/theme_service.dart';
+import 'data/repositories/auth_repository.dart';
 import 'data/repositories/drift_column_repository.dart';
 import 'data/repositories/drift_message_repository.dart';
+import 'data/repositories/stitch_auth_repository.dart';
 import 'data/services/app_database.dart';
+import 'data/services/auth_api_client.dart';
+import 'data/services/author_id_promotion.dart';
 import 'data/services/bot_bridge_service.dart';
 import 'data/services/local_identity_service.dart';
+import 'data/services/mock_hidden_reply_seed.dart';
+import 'data/services/mock_stitch_sibling_seed.dart';
+import 'data/services/mock_typing_seed.dart';
 import 'data/services/python_process_service.dart';
+import 'data/services/session_vault.dart';
+import 'data/services/stitch_http_client.dart';
 import 'data/services/stitch_ws_client.dart';
 import 'domain/branch_path_service.dart';
 import 'domain/message_store.dart';
+import 'ui/auth/login_viewmodel.dart';
 import 'ui/columns/columns_view.dart';
 import 'ui/columns/columns_viewmodel.dart';
 import 'ui/core/theme/app_theme.dart';
@@ -57,6 +67,19 @@ void main() async {
 
   final notificationService = NotificationService();
 
+  final sessionVault = SecureSessionVault();
+  final authApi = AuthApiClient(baseUrl: stitchEnv.apiBaseUrl);
+  final stitchHttp = StitchHttpClient(
+    baseUrl: stitchEnv.apiBaseUrl,
+    vault: sessionVault,
+  );
+  final authRepository = StitchAuthRepository(
+    vault: sessionVault,
+    api: authApi,
+    httpClient: stitchHttp,
+  );
+  identityService.bindAuthRepository(authRepository);
+
   final botBridge = BotBridgeService(
     StitchWsClient(Uri.parse('ws://127.0.0.1:8765')),
   );
@@ -82,6 +105,33 @@ void main() async {
     messageStore,
   );
 
+  if (stitchEnv.mockTypingCues) {
+    await seedMockTypingFixtures(
+      messages: messageRepository,
+      columns: columnRepository,
+      currentUserId: identityService.currentUserId,
+    );
+    StitchLog.info('mock typing cue fixtures enabled', tag: 'main');
+  }
+
+  if (stitchEnv.mockStitchSibling) {
+    await seedMockStitchSiblingFixtures(
+      messages: messageRepository,
+      columns: columnRepository,
+      currentUserId: identityService.currentUserId,
+    );
+    StitchLog.info('mock stitch-sibling fixtures enabled', tag: 'main');
+  }
+
+  if (stitchEnv.mockHiddenReply) {
+    await seedMockHiddenReplyFixtures(
+      messages: messageRepository,
+      columns: columnRepository,
+      currentUserId: identityService.currentUserId,
+    );
+    StitchLog.info('mock hidden-reply fixtures enabled', tag: 'main');
+  }
+
   final columnsViewModel = ColumnsViewModel(
     messageRepository,
     columnRepository,
@@ -90,27 +140,54 @@ void main() async {
     identityService,
     botBridge: _botBridge,
     notifications: notificationService,
+    mockTypingCues: stitchEnv.mockTypingCues,
   );
   await columnsViewModel.initialize();
 
-  runApp(
-    StitchApp(
-      columnsViewModel: columnsViewModel,
-      notificationService: notificationService,
-      themeService: themeService,
-    ),
+  Future<void> promoteLocalAuthorship() async {
+    final n = await AuthorIdPromotion.promoteLocalToCloud(
+      identity: identityService,
+      messages: messageRepository,
+    );
+    if (n > 0) await columnsViewModel.reloadAll();
+  }
+
+  final loginViewModel = LoginViewModel(
+    authRepository: authRepository,
+    notifications: notificationService,
+    onAuthenticated: promoteLocalAuthorship,
   );
+  // Soft restore: never block local chat on network. Runs after the local
+  // message store is up so a restored session can promote local→cloud
+  // author stamps before the first frame.
+  await loginViewModel.init();
+
+  runApp(StitchApp(
+    columnsViewModel: columnsViewModel,
+    notificationService: notificationService,
+    themeService: themeService,
+    authRepository: authRepository,
+    loginViewModel: loginViewModel,
+    stitchHttpClient: stitchHttp,
+  ));
 }
 
 class StitchApp extends StatefulWidget {
   final ColumnsViewModel columnsViewModel;
   final NotificationService notificationService;
   final ThemeService themeService;
+  final AuthRepository authRepository;
+  final LoginViewModel loginViewModel;
+  final StitchHttpClient stitchHttpClient;
+
   const StitchApp({
     super.key,
     required this.columnsViewModel,
     required this.notificationService,
     required this.themeService,
+    required this.authRepository,
+    required this.loginViewModel,
+    required this.stitchHttpClient,
   });
 
   @override
@@ -142,6 +219,9 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _lifecycleListener.dispose();
+    widget.loginViewModel.dispose();
+    widget.authRepository.dispose();
+    widget.stitchHttpClient.close();
     super.dispose();
   }
 
@@ -165,15 +245,22 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
           value: widget.columnsViewModel,
         ),
         ChangeNotifierProvider<ThemeService>.value(value: widget.themeService),
+        ChangeNotifierProvider<AuthRepository>.value(value: widget.authRepository),
+        ChangeNotifierProvider<LoginViewModel>.value(value: widget.loginViewModel),
+        Provider<StitchHttpClient>.value(value: widget.stitchHttpClient),
       ],
-      child: Consumer<ThemeService>(
-        builder: (context, themeService, _) => MaterialApp(
-          title: 'Stitch',
-          theme: AppTheme.light(),
-          darkTheme: AppTheme.dark(),
-          themeMode: themeService.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-          home: const NotificationOverlay(child: ColumnsView()),
-        ),
+      child: Consumer2<ThemeService, AuthRepository>(
+        builder: (context, themeService, auth, _) {
+          // Keep LocalIdentityService's cloud overlay in sync when auth changes.
+          // (bindAuthRepository already listens; this rebuild is for UI chrome.)
+          return MaterialApp(
+            title: 'Stitch',
+            theme: AppTheme.light(),
+            darkTheme: AppTheme.dark(),
+            themeMode: themeService.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+            home: const NotificationOverlay(child: ColumnsView()),
+          );
+        },
       ),
     );
   }

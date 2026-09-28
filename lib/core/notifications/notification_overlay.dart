@@ -145,12 +145,27 @@ class _ToastCardState extends State<_ToastCard> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  Future<void> _handleBodyTap() async {
+    final onTap = widget.notification.onTap;
+    if (onTap == null) return;
+    await onTap();
+    await _dismiss();
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final onColor = _onContainerColor(colors, widget.notification.severity);
+    final titleStyle = Theme.of(context).textTheme.titleSmall?.copyWith(
+          color: onColor,
+          fontWeight: FontWeight.w600,
+        );
     final textStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(color: onColor);
     final curve = CurvedAnimation(parent: _visibility, curve: Curves.easeOut, reverseCurve: Curves.easeIn);
+    final title = widget.notification.title;
+    final copyText = title == null || title.isEmpty
+        ? widget.notification.message
+        : '$title\n${widget.notification.message}';
 
     return FadeTransition(
       opacity: curve,
@@ -171,11 +186,30 @@ class _ToastCardState extends State<_ToastCard> with TickerProviderStateMixin {
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(_severityIcon(widget.notification.severity), size: 20, color: onColor),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(_severityIcon(widget.notification.severity), size: 20, color: onColor),
+                    ),
                     const SizedBox(width: 8),
-                    Expanded(child: Text(widget.notification.message, style: textStyle)),
-                    _CopyButton(text: widget.notification.message, color: onColor),
+                    Expanded(
+                      child: Material(
+                        type: MaterialType.transparency,
+                        child: InkWell(
+                          onTap: widget.notification.onTap == null ? null : _handleBodyTap,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (title != null && title.isNotEmpty)
+                                Text(title, style: titleStyle),
+                              Text(widget.notification.message, style: textStyle),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    _CopyButton(text: copyText, color: onColor),
                     IconButton(
                       icon: Icon(Icons.close, size: 20, color: onColor),
                       onPressed: _dismiss,

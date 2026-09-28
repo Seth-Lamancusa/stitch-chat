@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_chat/data/models/message.dart';
+import 'package:stitch_chat/data/repositories/auth_repository.dart';
 import 'package:stitch_chat/data/services/local_identity_service.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
 import 'package:stitch_chat/domain/message_store.dart';
@@ -13,7 +16,19 @@ class _FakeIdentityService implements LocalIdentityService {
   String get currentUserId => 'me';
 
   @override
-  Future<void> initialize() async {}
+  String get localUserId => 'me';
+
+  @override
+  bool get authenticatedOnline => false;
+
+  @override
+  void bindAuthRepository(AuthRepository auth) {}
+
+  @override
+  Future<void> initialize({Directory? supportDirectory}) async {}
+
+  @override
+  void dispose() {}
 }
 
 class _ThrowingColumnRepository extends FakeColumnRepository {

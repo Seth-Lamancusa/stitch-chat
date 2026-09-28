@@ -8,6 +8,7 @@ import 'package:stitch_chat/domain/message_store.dart';
 class FakeMessageRepository implements MessageRepository {
   final Map<String, Message> _messages = {};
   final Map<String, String> _replyParentOf = {};
+  final Map<String, bool> _replyEdgeHidden = {};
   final Map<String, List<String>> _replyChildrenOf = {};
   final Map<String, List<String>> _stitchChildrenOf = {};
   final Map<String, List<String>> _stitchParentsOf = {};
@@ -31,8 +32,20 @@ class FakeMessageRepository implements MessageRepository {
       return list;
     }
 
+    final children = _replyChildrenOf[parentId] ?? const [];
+    final visible = <String>[];
+    final hidden = <String>[];
+    for (final id in children) {
+      if (_replyEdgeHidden[id] == true) {
+        hidden.add(id);
+      } else {
+        visible.add(id);
+      }
+    }
+
     return OutgoingEdges(
-      replyOutgoing: sorted(_replyChildrenOf[parentId] ?? const []),
+      replyOutgoing: sorted(visible),
+      hiddenReplyOutgoing: sorted(hidden),
       stitchedOutgoing: sorted(_stitchChildrenOf[parentId] ?? const []),
     );
   }
@@ -41,8 +54,14 @@ class FakeMessageRepository implements MessageRepository {
   Future<IncomingEdges> getIncoming(String childId) async {
     final replyParentId = _replyParentOf[childId];
     final stitchParentIds = _stitchParentsOf[childId] ?? const [];
+    final hidden = _replyEdgeHidden[childId] == true;
     return IncomingEdges(
-      replyIncoming: [if (replyParentId != null) _messages[replyParentId]!],
+      replyIncoming: [
+        if (replyParentId != null && !hidden) _messages[replyParentId]!,
+      ],
+      hiddenReplyIncoming: [
+        if (replyParentId != null && hidden) _messages[replyParentId]!,
+      ],
       stitchedIncoming: stitchParentIds.map((id) => _messages[id]!).toList(),
     );
   }
@@ -63,8 +82,32 @@ class FakeMessageRepository implements MessageRepository {
       Stream.fromFuture(getOutgoing(parentId).then((e) => e.replyOutgoing));
 
   @override
-  Future<void> addReplyEdge(String parentId, String childId) async {
+  Future<List<Message>> getThreadRoots() async {
+    final roots = _messages.values
+        .where((m) => !_replyParentOf.containsKey(m.id))
+        .toList();
+    roots.sort((a, b) {
+      final at = a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bt = b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final byTime = bt.compareTo(at);
+      if (byTime != 0) return byTime;
+      return a.id.compareTo(b.id);
+    });
+    return roots;
+  }
+
+  @override
+  Stream<List<Message>> watchThreadRoots() =>
+      Stream.fromFuture(getThreadRoots());
+
+  @override
+  Future<void> addReplyEdge(
+    String parentId,
+    String childId, {
+    bool hidden = false,
+  }) async {
     _replyParentOf[childId] = parentId;
+    _replyEdgeHidden[childId] = hidden;
     (_replyChildrenOf[parentId] ??= []).add(childId);
   }
 
@@ -90,6 +133,30 @@ class FakeMessageRepository implements MessageRepository {
 
   @override
   Future<void> deleteMessage(String id) async => _messages.remove(id);
+
+  @override
+  Future<int> rewriteAuthorId({
+    required String fromAuthorId,
+    required String toAuthorId,
+  }) async {
+    if (fromAuthorId.isEmpty || fromAuthorId == toAuthorId) return 0;
+    var count = 0;
+    for (final entry in _messages.entries.toList()) {
+      if (entry.value.authorId == fromAuthorId) {
+        _messages[entry.key] = Message(
+          id: entry.value.id,
+          role: entry.value.role,
+          authorId: toAuthorId,
+          content: entry.value.content,
+          gitCommit: entry.value.gitCommit,
+          createdAt: entry.value.createdAt,
+          isStreaming: entry.value.isStreaming,
+        );
+        count++;
+      }
+    }
+    return count;
+  }
 }
 
 class FakeColumnRepository implements ColumnRepository {
@@ -150,6 +217,7 @@ class FakeColumnRepository implements ColumnRepository {
       anchorMessageId: existing.anchorMessageId,
       width: existing.width,
       scrollOffset: scrollOffset,
+      cwd: existing.cwd,
     );
   }
 
@@ -619,6 +687,181 @@ void main() {
       await messages.saveMessage(msg('leaf', DateTime.utc(2026, 1, 1)));
 
       expect((await service.findLatestDescendant('leaf')).id, 'leaf');
+    });
+  });
+
+  group('isNextOnVisibleOutgoing', () {
+    test('null pointer is on-path only for the default non-hidden reply', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('newer', DateTime.utc(2026, 1, 3)));
+      await messages.addReplyEdge('root', 'older');
+      await messages.addReplyEdge('root', 'newer');
+
+      expect(
+        await service.isNextOnVisibleOutgoing(columnId, 'root', 'newer'),
+        isTrue,
+      );
+      expect(
+        await service.isNextOnVisibleOutgoing(columnId, 'root', 'older'),
+        isFalse,
+      );
+    });
+
+    test('null pointer is off-path for hidden-only children', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('hidden', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'hidden', hidden: true);
+
+      expect(
+        await service.isNextOnVisibleOutgoing(columnId, 'root', 'hidden'),
+        isFalse,
+      );
+    });
+
+    test('matching pointer is on-path', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('new', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'new');
+      await columns.setBranchPointer(columnId, 'root', 'new');
+      expect(
+        await service.isNextOnVisibleOutgoing(columnId, 'root', 'new'),
+        isTrue,
+      );
+    });
+
+    test('sibling pointer is off-path', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('new', DateTime.utc(2026, 1, 3)));
+      await messages.addReplyEdge('root', 'older');
+      await messages.addReplyEdge('root', 'new');
+      await columns.setBranchPointer(columnId, 'root', 'older');
+      expect(
+        await service.isNextOnVisibleOutgoing(columnId, 'root', 'new'),
+        isFalse,
+      );
+    });
+  });
+
+  group('hidden reply edges', () {
+    test('default walk skips hidden children', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('hidden', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'hidden', hidden: true);
+
+      expect(
+        await service.resolveDefaultCandidate('root', Direction.outgoing),
+        isNull,
+      );
+      expect(
+        (await service.materializedTrajectory(columnId, 'root')).map((m) => m.id),
+        ['root'],
+      );
+    });
+
+    test('explicit navigation can select a hidden child', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('hidden', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('hiddenLeaf', DateTime.utc(2026, 1, 3)));
+      await messages.addReplyEdge('root', 'hidden', hidden: true);
+      await messages.addReplyEdge('hidden', 'hiddenLeaf');
+
+      expect(
+        await service.resolveExplicitOutgoing(columnId, 'root', forward: true),
+        'hidden',
+      );
+    });
+
+    test('non-hidden reply wins default; nav can reach hidden sibling', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('reply', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('hidden', DateTime.utc(2026, 1, 3)));
+      await messages.addReplyEdge('root', 'reply');
+      await messages.addReplyEdge('root', 'hidden', hidden: true);
+
+      expect(
+        (await service.resolveDefaultCandidate('root', Direction.outgoing))?.id,
+        'reply',
+      );
+
+      // Hidden is first in `.all`, so from the reply slot step backward.
+      await columns.setBranchPointer(columnId, 'root', 'reply');
+      expect(
+        await service.resolveExplicitOutgoing(columnId, 'root', forward: false),
+        'hidden',
+      );
+    });
+
+    test('replyTreeIds includes hidden reply descendants', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('hidden', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'hidden', hidden: true);
+
+      expect(await service.replyTreeIds('root'), {'root', 'hidden'});
+    });
+  });
+
+  group('replyTreeIds', () {
+    test('includes every reply fork under the thread root, not just the visible path', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('a', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('b', DateTime.utc(2026, 1, 3)));
+      await messages.saveMessage(msg('a1', DateTime.utc(2026, 1, 4)));
+      await messages.addReplyEdge('root', 'a');
+      await messages.addReplyEdge('root', 'b');
+      await messages.addReplyEdge('a', 'a1');
+      await columns.setBranchPointer(columnId, 'root', 'b');
+
+      final ids = await service.replyTreeIds('b');
+
+      expect(ids, {'root', 'a', 'b', 'a1'});
+    });
+
+    test('ignores stitch-only neighbors', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('stitched', DateTime.utc(2026, 1, 2)));
+      await messages.addStitchEdge('root', 'stitched');
+
+      expect(await service.replyTreeIds('root'), {'root'});
+    });
+  });
+
+  group('wouldLandOnVisibleBranch', () {
+    test('true when parent is on the visible path and child is the default pick', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('new', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'new');
+      expect(
+        await service.wouldLandOnVisibleBranch(columnId, 'root', 'root', 'new'),
+        isTrue,
+      );
+    });
+
+    test('false when parent is on the visible path but another sibling is selected', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('older', DateTime.utc(2026, 1, 2)));
+      await messages.addReplyEdge('root', 'older');
+      await columns.setBranchPointer(columnId, 'root', 'older');
+
+      expect(
+        await service.wouldLandOnVisibleBranch(columnId, 'older', 'root', 'new'),
+        isFalse,
+      );
+    });
+
+    test('false when parent is in the reply tree but off the visible path', () async {
+      await messages.saveMessage(msg('root', DateTime.utc(2026, 1, 1)));
+      await messages.saveMessage(msg('a', DateTime.utc(2026, 1, 2)));
+      await messages.saveMessage(msg('b', DateTime.utc(2026, 1, 3)));
+      await messages.addReplyEdge('root', 'a');
+      await messages.addReplyEdge('root', 'b');
+      await columns.setBranchPointer(columnId, 'root', 'b');
+
+      expect(
+        await service.wouldLandOnVisibleBranch(columnId, 'b', 'a', 'a-child'),
+        isFalse,
+      );
     });
   });
 }

@@ -1,33 +1,60 @@
 import 'message.dart';
 
 /// The candidate pool a message's outgoing navigator cycles through: which
-/// child (reply or stitch) is currently followed below it. Reply-first
-/// ordering matches [MessageRepository.getOutgoing].
+/// child (reply or stitch) is currently followed below it.
+///
+/// Ordering matches [MessageRepository.getOutgoing]: hidden replies,
+/// then non-hidden replies, then stitch children. Default path walks use only
+/// [replyOutgoing]; navigators and reveal actions use [all].
 class OutgoingEdges {
   final List<Message> replyOutgoing;
+  final List<Message> hiddenReplyOutgoing;
   final List<Message> stitchedOutgoing;
 
-  const OutgoingEdges({this.replyOutgoing = const [], this.stitchedOutgoing = const []});
+  const OutgoingEdges({
+    this.replyOutgoing = const [],
+    this.hiddenReplyOutgoing = const [],
+    this.stitchedOutgoing = const [],
+  });
 
-  /// The combined pool a sibling/outgoing navigator needs: reply candidates
-  /// first, then stitch candidates.
-  List<Message> get all => [...replyOutgoing, ...stitchedOutgoing];
+  /// Combined pool for sibling/outgoing navigation.
+  List<Message> get all => [
+        ...hiddenReplyOutgoing,
+        ...replyOutgoing,
+        ...stitchedOutgoing,
+      ];
 
-  bool get isEmpty => replyOutgoing.isEmpty && stitchedOutgoing.isEmpty;
+  bool get isEmpty =>
+      replyOutgoing.isEmpty &&
+      hiddenReplyOutgoing.isEmpty &&
+      stitchedOutgoing.isEmpty;
 }
 
 /// The candidate pool a message's incoming navigator cycles through: which
-/// parent (reply or stitch) its context is currently derived from. Reply-first
-/// ordering matches [MessageRepository.getIncoming].
+/// parent (reply or stitch) its context is currently derived from.
+///
+/// Ordering matches [MessageRepository.getIncoming]: hidden reply parents,
+/// then non-hidden reply parents, then stitch parents.
 class IncomingEdges {
   final List<Message> replyIncoming;
+  final List<Message> hiddenReplyIncoming;
   final List<Message> stitchedIncoming;
 
-  const IncomingEdges({this.replyIncoming = const [], this.stitchedIncoming = const []});
+  const IncomingEdges({
+    this.replyIncoming = const [],
+    this.hiddenReplyIncoming = const [],
+    this.stitchedIncoming = const [],
+  });
 
-  /// The combined pool an incoming navigator needs: the reply parent (0-1
-  /// elements today) first, then stitch parents.
-  List<Message> get all => [...replyIncoming, ...stitchedIncoming];
+  /// Combined pool for incoming navigation.
+  List<Message> get all => [
+        ...hiddenReplyIncoming,
+        ...replyIncoming,
+        ...stitchedIncoming,
+      ];
 
-  bool get isEmpty => replyIncoming.isEmpty && stitchedIncoming.isEmpty;
+  bool get isEmpty =>
+      replyIncoming.isEmpty &&
+      hiddenReplyIncoming.isEmpty &&
+      stitchedIncoming.isEmpty;
 }

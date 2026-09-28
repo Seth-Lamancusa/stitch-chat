@@ -28,6 +28,8 @@ class NotificationService extends ChangeNotifier {
     NotificationSeverity severity = NotificationSeverity.info,
     bool blocking = false,
     Duration duration = const Duration(seconds: 5),
+    String? title,
+    Future<void> Function()? onTap,
   }) {
     _notifications.add(AppNotification(
       id: _uuid.v4(),
@@ -35,6 +37,8 @@ class NotificationService extends ChangeNotifier {
       severity: severity,
       blocking: blocking,
       duration: duration,
+      title: title,
+      onTap: onTap,
     ));
     notifyListeners();
   }
@@ -43,8 +47,13 @@ class NotificationService extends ChangeNotifier {
     show(message, severity: NotificationSeverity.error, blocking: blocking);
   }
 
-  void showToast(String message, {NotificationSeverity severity = NotificationSeverity.info}) {
-    show(message, severity: severity);
+  void showToast(
+    String message, {
+    NotificationSeverity severity = NotificationSeverity.info,
+    String? title,
+    Future<void> Function()? onTap,
+  }) {
+    show(message, severity: severity, title: title, onTap: onTap);
   }
 
   void dismiss(String id) {

@@ -1,10 +1,13 @@
 import 'dart:async';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/logging/stitch_log.dart';
 import '../../data/models/message.dart';
+import '../../data/services/mock_typing_cue.dart';
 import '../../domain/branch_path_service.dart' show Direction;
 import '../core/adaptive_marker.dart';
 import '../core/incoming_navigator.dart';
@@ -23,13 +26,69 @@ import 'columns_viewmodel.dart';
 /// constant rather than a repeated literal.
 const double _kMessageRowGap = 2.0;
 
+/// Native folder dialog used by the column cwd editor. Tests replace this
+/// so they can return a path without opening a platform dialog.
+@visibleForTesting
+Future<String?> Function({String? initialDirectory})?
+debugColumnDirectoryPicker;
+
+Future<String?> _pickColumnDirectory({String? initialDirectory}) {
+  final override = debugColumnDirectoryPicker;
+  if (override != null) {
+    return override(initialDirectory: initialDirectory);
+  }
+  return getDirectoryPath(
+    initialDirectory: initialDirectory,
+    confirmButtonText: 'Select folder',
+  );
+}
+
 /// One column: header, message list with navigators/markers, composer.
 /// Absorbs the old `ChatView`'s bubble rendering and composer, scoped to a
 /// single column instead of the whole app.
-class ColumnView extends StatefulWidget {
-  const ColumnView({super.key, required this.state});
+/// Opens the column cwd dialog and persists the result via [ColumnsViewModel].
+Future<void> editColumnCwd(BuildContext context, ColumnUiState state) async {
+  final vm = context.read<ColumnsViewModel>();
+  final next = await showDialog<String?>(
+    context: context,
+    builder: (dialogContext) => _CwdPickerDialog(initialPath: state.cwd ?? ''),
+  );
+  if (next == null) return;
+  await vm.updateColumnCwd(state.id, next);
+}
+
+/// Folder icon for the column working directory ("environment" picker).
+class ColumnCwdIconButton extends StatelessWidget {
+  const ColumnCwdIconButton({super.key, required this.state});
 
   final ColumnUiState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final cwd = state.cwd;
+    final hasCwd = cwd != null && cwd.isNotEmpty;
+    return IconButton(
+      tooltip: hasCwd ? cwd : 'Set column cwd',
+      icon: Icon(
+        hasCwd ? Icons.folder : Icons.folder_outlined,
+        size: 18,
+      ),
+      onPressed: () => editColumnCwd(context, state),
+    );
+  }
+}
+
+class ColumnView extends StatefulWidget {
+  const ColumnView({
+    super.key,
+    required this.state,
+    this.showCwdInHeader = true,
+  });
+
+  final ColumnUiState state;
+
+  /// When false, cwd is expected elsewhere (e.g. single-column overlay).
+  final bool showCwdInHeader;
 
   @override
   State<ColumnView> createState() => _ColumnViewState();
@@ -38,12 +97,53 @@ class ColumnView extends StatefulWidget {
 class _ColumnViewState extends State<ColumnView> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  final _messageListKey = GlobalKey<_MessageListState>();
+
+  bool _wasComposerActive = false;
+  String? _wasReplyingToMessageId;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onDraftChanged);
+  }
+
+  /// Runs after the current pointer gesture finishes. A single post-frame
+  /// callback is too early for message-body taps: [SelectionArea] claims
+  /// focus on pointer-up and would steal the caret we just placed.
+  void _scheduleComposerFocus() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+    });
+  }
+
+  /// Activate this column and focus the composer — used for column chrome
+  /// taps and message-body taps (message markdown is a [SelectionArea], so
+  /// those taps never reach the outer [GestureDetector]).
+  void _activateColumn(ColumnsViewModel vm, String columnId) {
+    vm.setActiveColumn(columnId);
+    _scheduleComposerFocus();
+  }
+
+  /// Focus the reply field when the composer appears (column activated or
+  /// created) or when an explicit reply target is set on an already-active
+  /// column — covers Reply, new column, and click-to-activate without
+  /// touching [ColumnsViewModel].
+  void _focusComposerWhenShown(ColumnUiState state) {
+    if (!state.isActive) {
+      _wasComposerActive = false;
+      return;
+    }
+    final composerAppeared = !_wasComposerActive;
+    final replyTargetPinned = state.replyingToMessageId != null &&
+        state.replyingToMessageId != _wasReplyingToMessageId;
+    if (composerAppeared || replyTargetPinned) {
+      _scheduleComposerFocus();
+    }
+    _wasComposerActive = true;
+    _wasReplyingToMessageId = state.replyingToMessageId;
   }
 
   @override
@@ -66,9 +166,7 @@ class _ColumnViewState extends State<ColumnView> {
     final content = _controller.text;
     _controller.clear();
     _focusNode.requestFocus();
-    _messageListKey.currentState?.sendAndStickToBottom(
-      () => vm.sendMessage(widget.state.id, content),
-    );
+    vm.sendMessage(widget.state.id, content);
   }
 
   @override
@@ -90,21 +188,30 @@ class _ColumnViewState extends State<ColumnView> {
       }
     }
 
+    _focusComposerWhenShown(state);
+
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => vm.setActiveColumn(state.id),
+      onTap: () => _activateColumn(vm, state.id),
       child: ColoredBox(
         color: state.isActive
             ? colorScheme.onSurface.withValues(alpha: 0.03)
             : Colors.transparent,
         child: Column(
           children: [
-            _Header(state: state, onClose: () => vm.removeColumn(state.id)),
+            _Header(
+              state: state,
+              showCwdInHeader: widget.showCwdInHeader,
+              onClose: () => vm.removeColumn(state.id),
+            ),
             Expanded(
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: _MessageList(key: _messageListKey, state: state),
+                    child: _MessageList(
+                      state: state,
+                      onColumnBodyTap: () => _activateColumn(vm, state.id),
+                    ),
                   ),
                   if (state.isActive)
                     Positioned(
@@ -132,44 +239,15 @@ class _ColumnViewState extends State<ColumnView> {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.state, required this.onClose});
+  const _Header({
+    required this.state,
+    required this.onClose,
+    this.showCwdInHeader = true,
+  });
 
   final ColumnUiState state;
   final VoidCallback onClose;
-
-  Future<void> _editCwd(BuildContext context) async {
-    final vm = context.read<ColumnsViewModel>();
-    final controller = TextEditingController(text: state.cwd ?? '');
-    final next = await showDialog<String?>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Column cwd'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(
-              hintText: 'Filesystem path for agent runtimes',
-            ),
-            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-              child: const Text('Save'),
-            ),
-          ],
-        );
-      },
-    );
-    controller.dispose();
-    if (next == null) return;
-    await vm.updateColumnCwd(state.id, next);
-  }
+  final bool showCwdInHeader;
 
   @override
   Widget build(BuildContext context) {
@@ -177,9 +255,6 @@ class _Header extends StatelessWidget {
     final headerColor = state.isActive
         ? context.appColors.columnHeaderSurfaceSelected
         : context.appColors.columnHeaderSurface;
-    final cwd = state.cwd;
-    final hasCwd = cwd != null && cwd.isNotEmpty;
-
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -216,14 +291,7 @@ class _Header extends StatelessWidget {
               ),
             ),
           ),
-          IconButton(
-            tooltip: hasCwd ? cwd : 'Set column cwd',
-            icon: Icon(
-              hasCwd ? Icons.folder : Icons.folder_outlined,
-              size: 18,
-            ),
-            onPressed: () => _editCwd(context),
-          ),
+          if (showCwdInHeader) ColumnCwdIconButton(state: state),
           IconButton(
             icon: const Icon(Icons.close, size: 18),
             onPressed: onClose,
@@ -234,18 +302,217 @@ class _Header extends StatelessWidget {
   }
 }
 
+/// Column cwd editor. The path is chosen with the platform folder dialog
+/// and shown read-only; empty string means clear.
+class _CwdPickerDialog extends StatefulWidget {
+  const _CwdPickerDialog({required this.initialPath});
+
+  final String initialPath;
+
+  @override
+  State<_CwdPickerDialog> createState() => _CwdPickerDialogState();
+}
+
+class _CwdPickerDialogState extends State<_CwdPickerDialog> {
+  late String _path = widget.initialPath;
+  bool _picking = false;
+  String? _error;
+
+  Future<void> _pick() async {
+    setState(() {
+      _picking = true;
+      _error = null;
+    });
+    String? picked;
+    Object? failure;
+    StackTrace? stack;
+    try {
+      final initial = _path.trim();
+      picked = await _pickColumnDirectory(
+        initialDirectory: initial.isEmpty ? null : initial,
+      );
+    } catch (error, trace) {
+      failure = error;
+      stack = trace;
+    }
+    if (!mounted) return;
+    if (failure != null) {
+      StitchLog.warning(
+        'column cwd folder picker failed',
+        tag: 'dart.column',
+        error: failure,
+        stackTrace: stack,
+      );
+    }
+    setState(() {
+      _picking = false;
+      _error = failure == null ? null : 'Could not open the folder picker';
+      if (picked != null) _path = picked;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final hasPath = _path.trim().isNotEmpty;
+    return AlertDialog(
+      title: const Text('Column cwd'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              hasPath ? _path : 'No folder selected',
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: hasPath
+                    ? colorScheme.onSurface
+                    : colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _picking ? null : _pick,
+                icon: const Icon(Icons.folder_open),
+                label: Text(hasPath ? 'Change folder' : 'Choose folder'),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: TextStyle(color: colorScheme.error, fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (hasPath)
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(''),
+            child: const Text('Clear'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(_path),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Scroll controller that can arm a one-shot pin-preservation correction
+/// consumed during the next [ScrollPosition.applyContentDimensions].
+///
+/// Used by [_MessageListState.navigatePreservingPin] so relocating
+/// `CustomScrollView.center` onto a message doesn't flash for a frame the
+/// way a post-layout [ScrollPosition.jumpTo] would.
+class _PinPreservingScrollController extends ScrollController {
+  double? _targetPixels;
+  bool _alignToMinScrollExtent = false;
+
+  /// Arm a correction consumed on the next [ScrollPosition.applyContentDimensions].
+  ///
+  /// Pass [targetPixels] for an explicit offset (persisted restore, fork pin).
+  /// Pass [alignToMinScrollExtent] when the anchor is the first visible row so
+  /// the before-[center] block (top marker) sits flush with the viewport top;
+  /// the exact [ScrollPosition.minScrollExtent] is only known once sliver
+  /// heights are measured during that same layout pass — still before paint,
+  /// not a post-frame [jumpTo].
+  void armPinPreservation({
+    double? targetPixels,
+    bool alignToMinScrollExtent = false,
+  }) {
+    assert(targetPixels == null || !alignToMinScrollExtent);
+    _targetPixels = targetPixels;
+    _alignToMinScrollExtent = alignToMinScrollExtent;
+  }
+
+  ({double? targetPixels, bool alignToMinScrollExtent}) takeArmedCorrection() {
+    final correction = (
+      targetPixels: _targetPixels,
+      alignToMinScrollExtent: _alignToMinScrollExtent,
+    );
+    _targetPixels = null;
+    _alignToMinScrollExtent = false;
+    return correction;
+  }
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _PinPreservingScrollPosition(
+      physics: physics,
+      context: context,
+      oldPosition: oldPosition,
+      takeArmedCorrection: takeArmedCorrection,
+    );
+  }
+}
+
+class _PinPreservingScrollPosition extends ScrollPositionWithSingleContext {
+  _PinPreservingScrollPosition({
+    required super.physics,
+    required super.context,
+    super.oldPosition,
+    required this.takeArmedCorrection,
+  });
+
+  final ({double? targetPixels, bool alignToMinScrollExtent})
+      Function() takeArmedCorrection;
+
+  @override
+  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
+    // Run the normal extent update first so extents reflect this layout
+    // pass. Returning false below tells [RenderViewport] to re-layout with
+    // the corrected offset before paint — the RetainableScrollPosition
+    // pattern.
+    final applied = super.applyContentDimensions(
+      minScrollExtent,
+      maxScrollExtent,
+    );
+    final correction = takeArmedCorrection();
+    final target = correction.alignToMinScrollExtent
+        ? minScrollExtent
+        : correction.targetPixels;
+    if (target == null) return applied;
+
+    final clamped = target.clamp(minScrollExtent, maxScrollExtent);
+    if ((clamped - pixels).abs() < 0.5) return applied;
+
+    correctPixels(clamped);
+    return false;
+  }
+}
+
 class _MessageList extends StatefulWidget {
-  const _MessageList({super.key, required this.state});
+  const _MessageList({
+    super.key,
+    required this.state,
+    required this.onColumnBodyTap,
+  });
 
   final ColumnUiState state;
+  final VoidCallback onColumnBodyTap;
 
   @override
   State<_MessageList> createState() => _MessageListState();
 }
 
 class _MessageListState extends State<_MessageList> {
-  // Floating-point rounding tolerance only — not a "near bottom" zone.
-  static const double _bottomThreshold = 2;
   static const Duration _scrollSaveDebounce = Duration(milliseconds: 400);
 
   // How close to an edge (in pixels) triggers an auto-load of the next
@@ -253,9 +520,8 @@ class _MessageListState extends State<_MessageList> {
   // observer-style margin.
   static const double _loadMoreMargin = 200;
 
-  final _scrollController = ScrollController();
-  bool _isAtBottom = true;
-  bool _restoredInitialOffset = false;
+  final _scrollController = _PinPreservingScrollController();
+  bool _initialScrollCorrectionArmed = false;
   Timer? _scrollSaveTimer;
 
   // Identifies the pinned *slot* in the sliver list passed to
@@ -264,8 +530,9 @@ class _MessageListState extends State<_MessageList> {
   // before this key grow backward (negative offset) and slivers after it
   // grow forward, whichever row currently lands in the center sliver simply
   // never moves on screen when content on either side is replaced by a
-  // fork switch — a layout invariant, not something asserted after the fact
-  // with `jumpTo` like the old `ListView(reverse: true)` approach required.
+  // fork switch — provided that row was already the center. Relocating
+  // which message occupies this slot (first outgoing/incoming switch)
+  // still needs a one-shot scroll correction; see [navigatePreservingPin].
   final Key _centerKey = UniqueKey();
 
   @override
@@ -282,31 +549,85 @@ class _MessageListState extends State<_MessageList> {
     super.dispose();
   }
 
-  /// Runs [action] (a new outgoing message) and, if the user was already
-  /// pinned to the bottom, keeps them there. This is deliberately *not* a
-  /// generic "row count changed" reaction in [didUpdateWidget]: that would
-  /// also fire for [ColumnsViewModel.extendAbove]/[ColumnsViewModel.extendBelow]/
-  /// [ColumnsViewModel.revealStitch] (an explicit or auto-triggered "load
-  /// more", which shouldn't also yank the view) and for branch switches
-  /// (already handled, and in the opposite way, by the column's persisted
-  /// anchor — see `_centerKey`). Scroll intent lives with the action that
-  /// causes it instead of being
-  /// inferred after the fact from its side effects.
-  void sendAndStickToBottom(void Function() action) {
-    final wasAtBottom = _isAtBottom;
-    action();
-    // `action` (a real repo round trip) only *schedules* the rebuild that
-    // lays out the new row — reading `maxScrollExtent` before that frame
-    // runs would target the stale, pre-send extent, undershooting by one
-    // message. Deferring to a post-frame callback lets `_scrollToBottom`
-    // read the extent that actually includes the new row.
-    if (wasAtBottom) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  /// Sibling/parent navigator entry point: run [action] (which re-anchors the
+  /// column onto [pinMessageId] and rebuilds the branch), then correct the
+  /// scroll offset if that re-anchor moved [pinMessageId] on screen.
+  ///
+  /// `CustomScrollView.center` keeps a *slot* fixed, not a message. When the
+  /// pin is already the center row, [action] only swaps content around it and
+  /// no correction is needed. When the center was still some other row (the
+  /// typical first outgoing switch, center = leaf), [action] puts
+  /// [pinMessageId] into that slot and the pin's screen Y would change. We
+  /// precompute the target [ScrollPosition.pixels] from the pin's and
+  /// viewport's global Y *before* [action], arm it afterward, and let the
+  /// next [ScrollPosition.applyContentDimensions] `correctPixels` + return
+  /// false so the viewport re-lays out before paint (no post-frame flash).
+  Future<void> navigatePreservingPin({
+    required String pinMessageId,
+    required Future<void> Function() action,
+  }) {
+    return _navigatePreservingPin(
+      pinMessageId: pinMessageId,
+      action: action,
+    );
+  }
+
+  Future<void> _navigatePreservingPin({
+    required String pinMessageId,
+    required Future<void> Function() action,
+  }) async {
+    // Measure before [action] while size access is legal. After the pin
+    // becomes the center sliver (anchor 0, AxisDirection.down), its top
+    // paints at `viewportTop - pixels`, so this target puts it back at
+    // [yBefore]. Applied during layout via [correctPixels] — not a
+    // post-frame [jumpTo] — so there's no one-frame flash.
+    final yBefore = _messageTopY(pinMessageId);
+    final viewportTop = _viewportTopY();
+
+    await action();
+    if (!mounted || yBefore == null || viewportTop == null) return;
+
+    // Arm *after* [action] returns: [notifyListeners] has only marked the
+    // tree dirty — the rebuild/layout that consumes this correction hasn't
+    // run yet. Arming before the await would risk an intervening frame
+    // (during the async nav) consuming the pending correction against the
+    // still-old branch.
+    _scrollController.armPinPreservation(
+      targetPixels: viewportTop - yBefore,
+    );
+    await WidgetsBinding.instance.endOfFrame;
+  }
+
+  /// Top edge of the scrollable viewport in global coordinates.
+  double? _viewportTopY() {
+    if (!_scrollController.hasClients) return null;
+    final box = _scrollController.position.context.notificationContext
+        ?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero).dy;
+  }
+
+  /// Top edge of the row for [messageId] in global coordinates, or null if
+  /// that row isn't laid out under this list yet.
+  double? _messageTopY(String messageId) {
+    final key = ValueKey<String>(messageId);
+    Element? match;
+    void visitor(Element element) {
+      if (match != null) return;
+      if (element.widget.key == key) {
+        match = element;
+        return;
+      }
+      element.visitChildren(visitor);
     }
+
+    context.visitChildElements(visitor);
+    final box = match?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero).dy;
   }
 
   void _onScroll() {
-    _updateIsAtBottom();
     _scheduleScrollSave();
     _maybeTriggerLoadMore();
   }
@@ -335,22 +656,6 @@ class _MessageListState extends State<_MessageList> {
     }
   }
 
-  void _updateIsAtBottom() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    _isAtBottom =
-        (position.maxScrollExtent - position.pixels) <= _bottomThreshold;
-  }
-
-  void _scrollToBottom() {
-    if (!_scrollController.hasClients) return;
-    _scrollController.animateTo(
-      _scrollController.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeOut,
-    );
-  }
-
   // Debounced rather than written on every scroll-notification frame, so a
   // drag doesn't turn into dozens of writes/sec — only the position at rest
   // (or 400ms after the last movement) hits the DB. `updateColumnScrollOffset`
@@ -366,24 +671,30 @@ class _MessageListState extends State<_MessageList> {
     });
   }
 
-  // Runs once per column, after the first frame with a non-empty list so
-  // `maxScrollExtent` is populated — restores the position persisted from a
-  // previous session/load rather than the default 0.
-  void _maybeRestoreInitialOffset() {
-    if (_restoredInitialOffset || !_scrollController.hasClients) return;
-    _restoredInitialOffset = true;
-    final offset = widget.state.initialScrollOffset;
-    if (offset != null) {
-      final position = _scrollController.position;
-      // Offsets into the before-anchor sliver are legitimately negative now
-      // (`minScrollExtent` is negative for a `center`-based CustomScrollView),
-      // unlike the old reversed ListView where 0 was always the lower bound.
-      _scrollController.jumpTo(
-        offset.clamp(position.minScrollExtent, position.maxScrollExtent),
-      );
-      _updateIsAtBottom();
+  /// One-shot scroll target consumed during the next
+  /// [ScrollPosition.applyContentDimensions] — same path as
+  /// [navigatePreservingPin], not a post-frame [jumpTo].
+  ///
+  /// When the anchor is the first visible row, offset `0` pins the anchor
+  /// message to the viewport top and hides the top [AdaptiveMarker] in the
+  /// before-[center] sliver; [alignToMinScrollExtent] uses the laid-out
+  /// [ScrollPosition.minScrollExtent] during the same layout pass.
+  void _armInitialScrollCorrectionIfNeeded({
+    required int anchorIndex,
+    required ColumnUiState state,
+  }) {
+    if (_initialScrollCorrectionArmed) return;
+    _initialScrollCorrectionArmed = true;
+
+    final persisted = state.initialScrollOffset;
+    if (persisted != null) {
+      _scrollController.armPinPreservation(targetPixels: persisted);
+    } else if (anchorIndex == 0) {
+      _scrollController.armPinPreservation(alignToMinScrollExtent: true);
     }
-    _maybeTriggerLoadMore();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _maybeTriggerLoadMore();
+    });
   }
 
   @override
@@ -404,24 +715,22 @@ class _MessageListState extends State<_MessageList> {
       );
     }
 
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _maybeRestoreInitialOffset(),
-    );
-
     // The persisted anchor (`ColumnsViewModel.anchorOf`) is already exactly
     // the row that must stay visually fixed across a fork switch:
     // `navigateOutgoing`/`navigateIncoming` re-anchor it to `parentId`/
     // `childId` respectively — the one row each swap leaves untouched. It's
-    // guaranteed present in `state.rows` because `getFullVisibleBranch`
+    // guaranteed present in `state.rows` because `materializedTrajectory`
     // always builds `[...above, anchor, ...below]` from this same id, and
     // `state.rows` is only non-empty when an anchor exists (see the
     // early-return above).
     final anchorId = vm.anchorOf(state.id);
-    final anchorIndex = state.rows.indexWhere((r) => r.message.id == anchorId);
-    assert(
-      anchorIndex != -1,
-      'persisted anchor $anchorId missing from derived branch',
+    var anchorIndex = state.rows.indexWhere(
+      (r) => r.message.id == anchorId,
     );
+    // If anchor isn't on this branch (stale id / mid-update), pin to the tip.
+    if (anchorIndex == -1) {
+      anchorIndex = state.rows.length - 1;
+    }
 
     final showAuthorById = <String, bool>{
       for (int i = 0; i < state.rows.length; i++)
@@ -431,21 +740,93 @@ class _MessageListState extends State<_MessageList> {
                 _authorKey(state.rows[i - 1].message),
     };
 
-    // Slivers listed before `center` grow backward (negative offset), so
-    // this sliver's own child order must have index 0 closest to the
-    // anchor (the row immediately above it) and increasing index moving
-    // further back in time, ending in the top marker.
-    final beforeRows = state.rows.sublist(0, anchorIndex).reversed.toList();
+    // Slivers listed before `center` grow backward (negative offset). The
+    // before-column is laid out top→bottom inside a single box whose bottom
+    // edge sits on the center, so chronological order (oldest first) puts
+    // the row immediately above the anchor last in that column.
     final centerRow = state.rows[anchorIndex];
     final afterRows = state.rows.sublist(anchorIndex + 1);
 
-    final centerGapAbove = beforeRows.isNotEmpty ? _kMessageRowGap : 0.0;
+    final centerGapAbove = anchorIndex > 0 ? _kMessageRowGap : 0.0;
     final centerGapBelow = afterRows.isNotEmpty ? _kMessageRowGap : 0.0;
-    StitchLog.hop(
-      'dart.column',
-      'center row spacing id=${centerRow.message.id} '
-      'gapAbove=$centerGapAbove gapBelow=$centerGapBelow',
+
+    _armInitialScrollCorrectionIfNeeded(
+      anchorIndex: anchorIndex,
+      state: state,
     );
+
+    // Eager columns inside SliverToBoxAdapters — not SliverList. A list
+    // sliver only lays out the cache window and *estimates* the rest from
+    // average child height; tall fenced code blocks make that estimate
+    // wildly wrong, so the scrollbar jumps as they enter/leave view. The
+    // branch window is already bounded, so measuring every row is cheap,
+    // and `center` still pins the anchor across fork switches.
+    final beforeChildren = <Widget>[
+      AdaptiveMarker(
+        isTop: true,
+        state: state.topLoading
+            ? MarkerVisualState.loading
+            : (state.topError != null
+                  ? MarkerVisualState.error
+                  : state.topMarker),
+        stitchCount: state.topStitchCount,
+        hiddenCount: state.topHiddenCount,
+        errorMessage: state.topError,
+        onLoadStitches: () => vm.revealStitch(
+          state.id,
+          state.rows.first.message.id,
+          Direction.incoming,
+        ),
+        onRevealHidden: () => vm.loadHiddenAbove(state.id),
+        onRetry: () => vm.extendAbove(state.id),
+      ),
+      // Chronological order: oldest at the top of this box. The box sits
+      // above `center`, so its last child is the row immediately above
+      // the anchor.
+      for (int i = 0; i < anchorIndex; i++) ...[
+        const SizedBox(height: _kMessageRowGap),
+        _MessageRow(
+          key: ValueKey(state.rows[i].message.id),
+          columnId: state.id,
+          row: state.rows[i],
+          showAuthor: showAuthorById[state.rows[i].message.id]!,
+          onColumnBodyTap: widget.onColumnBodyTap,
+        ),
+      ],
+    ];
+
+    final afterChildren = <Widget>[
+      for (int i = 0; i < afterRows.length; i++) ...[
+        if (i == 0 && centerGapBelow > 0)
+          const SizedBox(height: _kMessageRowGap),
+        _MessageRow(
+          key: ValueKey(afterRows[i].message.id),
+          columnId: state.id,
+          row: afterRows[i],
+          showAuthor: showAuthorById[afterRows[i].message.id]!,
+          onColumnBodyTap: widget.onColumnBodyTap,
+        ),
+        if (i < afterRows.length - 1) const SizedBox(height: _kMessageRowGap),
+      ],
+      AdaptiveMarker(
+        isTop: false,
+        state: state.bottomLoading
+            ? MarkerVisualState.loading
+            : (state.bottomError != null
+                  ? MarkerVisualState.error
+                  : state.bottomMarker),
+        stitchCount: state.bottomStitchCount,
+        hiddenCount: state.bottomHiddenCount,
+        errorMessage: state.bottomError,
+        onLoadStitches: () => vm.revealStitch(
+          state.id,
+          state.rows.last.message.id,
+          Direction.outgoing,
+        ),
+        onRevealHidden: () => vm.loadHiddenBelow(state.id),
+        onRetry: () => vm.extendBelow(state.id),
+      ),
+    ];
 
     return CustomScrollView(
       controller: _scrollController,
@@ -453,34 +834,12 @@ class _MessageListState extends State<_MessageList> {
       slivers: [
         SliverPadding(
           padding: EdgeInsets.fromLTRB(12, 12, 12, centerGapAbove),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              for (int i = 0; i < beforeRows.length; i++) ...[
-                _MessageRow(
-                  key: ValueKey(beforeRows[i].message.id),
-                  columnId: state.id,
-                  row: beforeRows[i],
-                  showAuthor: showAuthorById[beforeRows[i].message.id]!,
-                ),
-                const SizedBox(height: _kMessageRowGap),
-              ],
-              AdaptiveMarker(
-                isTop: true,
-                state: state.topLoading
-                    ? MarkerVisualState.loading
-                    : (state.topError != null
-                          ? MarkerVisualState.error
-                          : state.topMarker),
-                stitchCount: state.topStitchCount,
-                errorMessage: state.topError,
-                onLoadStitches: () => vm.revealStitch(
-                  state.id,
-                  state.rows.first.message.id,
-                  Direction.incoming,
-                ),
-                onRetry: () => vm.extendAbove(state.id),
-              ),
-            ]),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: beforeChildren,
+            ),
           ),
         ),
         SliverToBoxAdapter(
@@ -492,41 +851,18 @@ class _MessageListState extends State<_MessageList> {
               columnId: state.id,
               row: centerRow,
               showAuthor: showAuthorById[centerRow.message.id]!,
+              onColumnBodyTap: widget.onColumnBodyTap,
             ),
           ),
         ),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 70),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              if (afterRows.isNotEmpty) const SizedBox(height: _kMessageRowGap),
-              for (int i = 0; i < afterRows.length; i++) ...[
-                _MessageRow(
-                  key: ValueKey(afterRows[i].message.id),
-                  columnId: state.id,
-                  row: afterRows[i],
-                  showAuthor: showAuthorById[afterRows[i].message.id]!,
-                ),
-                if (i < afterRows.length - 1)
-                  const SizedBox(height: _kMessageRowGap),
-              ],
-              AdaptiveMarker(
-                isTop: false,
-                state: state.bottomLoading
-                    ? MarkerVisualState.loading
-                    : (state.bottomError != null
-                          ? MarkerVisualState.error
-                          : state.bottomMarker),
-                stitchCount: state.bottomStitchCount,
-                errorMessage: state.bottomError,
-                onLoadStitches: () => vm.revealStitch(
-                  state.id,
-                  state.rows.last.message.id,
-                  Direction.outgoing,
-                ),
-                onRetry: () => vm.extendBelow(state.id),
-              ),
-            ]),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: afterChildren,
+            ),
           ),
         ),
       ],
@@ -543,11 +879,44 @@ class _MessageRow extends StatelessWidget {
     required this.columnId,
     required this.row,
     required this.showAuthor,
+    required this.onColumnBodyTap,
   });
 
   final String columnId;
   final MessageRowData row;
   final bool showAuthor;
+  final VoidCallback onColumnBodyTap;
+
+  Future<void> _navigateOutgoing(
+    BuildContext context,
+    String anchorId, {
+    required bool forward,
+  }) {
+    final list = context.findAncestorStateOfType<_MessageListState>();
+    final nav = context.read<ColumnsViewModel>().navigateOutgoing;
+    if (list == null) {
+      return nav(columnId, anchorId, forward: forward);
+    }
+    return list.navigatePreservingPin(
+      pinMessageId: anchorId,
+      action: () => nav(columnId, anchorId, forward: forward),
+    );
+  }
+
+  Future<void> _navigateIncoming(
+    BuildContext context, {
+    required bool forward,
+  }) {
+    final list = context.findAncestorStateOfType<_MessageListState>();
+    final nav = context.read<ColumnsViewModel>().navigateIncoming;
+    if (list == null) {
+      return nav(columnId, row.message.id, forward: forward);
+    }
+    return list.navigatePreservingPin(
+      pinMessageId: row.message.id,
+      action: () => nav(columnId, row.message.id, forward: forward),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -555,13 +924,6 @@ class _MessageRow extends StatelessWidget {
     final isMe =
         row.message.authorId != null &&
         row.message.authorId == vm.currentUserId;
-
-    if (showAuthor) {
-      StitchLog.hop(
-        'dart.column',
-        'author label spacing id=${row.message.id} rowGap=6 labelBottom=4',
-      );
-    }
 
     // Author label
     final authorLabel = Padding(
@@ -574,11 +936,17 @@ class _MessageRow extends StatelessWidget {
       ),
     );
 
-    // Message bubble
-    Widget bubble = MessageCard(
-      message: row.message,
-      currentUserId: vm.currentUserId,
-      onReply: () => vm.setReplyTarget(columnId, row.message.id),
+    // Message bubble — strip mock-typing markers from displayed content;
+    // when STITCH_MOCK_TYPING_CUES is on, those markers also feed typingAuthors.
+    Widget bubble = Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerUp: (_) => onColumnBodyTap(),
+      child: MessageCard(
+        message: MockTypingCue.forDisplay(row.message),
+        currentUserId: vm.currentUserId,
+        onReply: () => vm.setReplyTarget(columnId, row.message.id),
+        typingAuthors: vm.typingAuthorsFor(row.message),
+      ),
     );
 
     // Nav buttons (if outgoing exists)
@@ -590,12 +958,13 @@ class _MessageRow extends StatelessWidget {
       final canNext =
           row.outgoingCurrentIndex >= 0 &&
           row.outgoingCurrentIndex < row.outgoing!.all.length - 1;
+      // Stitch candidates follow hidden + non-hidden replies in `.all`.
+      final stitchStart = row.outgoing!.hiddenReplyOutgoing.length +
+          row.outgoing!.replyOutgoing.length;
       final prevIsStitch =
-          canPrev &&
-          (row.outgoingCurrentIndex - 1) >= row.outgoing!.replyOutgoing.length;
+          canPrev && (row.outgoingCurrentIndex - 1) >= stitchStart;
       final nextIsStitch =
-          canNext &&
-          (row.outgoingCurrentIndex + 1) >= row.outgoing!.replyOutgoing.length;
+          canNext && (row.outgoingCurrentIndex + 1) >= stitchStart;
 
       // `anchorId` is the parent row above — the one row a sibling swap
       // leaves untouched, and exactly what `navigateOutgoing` re-anchors the
@@ -606,8 +975,7 @@ class _MessageRow extends StatelessWidget {
         enabled: canPrev,
         loading: false,
         isStitch: prevIsStitch,
-        onPressed: () =>
-            vm.navigateOutgoing(columnId, anchorId, forward: false),
+        onPressed: () => _navigateOutgoing(context, anchorId, forward: false),
         tooltip: 'Previous',
       );
 
@@ -616,7 +984,7 @@ class _MessageRow extends StatelessWidget {
         enabled: canNext,
         loading: false,
         isStitch: nextIsStitch,
-        onPressed: () => vm.navigateOutgoing(columnId, anchorId, forward: true),
+        onPressed: () => _navigateOutgoing(context, anchorId, forward: true),
         tooltip: 'Next',
       );
     }
@@ -631,13 +999,12 @@ class _MessageRow extends StatelessWidget {
           // anchor to this message, so it's picked up as the scroll anchor
           // automatically.
           IncomingNavigator(
+            hiddenCount: row.incoming!.hiddenReplyIncoming.length,
             replyCount: row.incoming!.replyIncoming.length,
             stitchCount: row.incoming!.stitchedIncoming.length,
             currentIndex: row.incomingCurrentIndex,
-            onPrev: () =>
-                vm.navigateIncoming(columnId, row.message.id, forward: false),
-            onNext: () =>
-                vm.navigateIncoming(columnId, row.message.id, forward: true),
+            onPrev: () => _navigateIncoming(context, forward: false),
+            onNext: () => _navigateIncoming(context, forward: true),
           ),
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -682,6 +1049,8 @@ class _MessageRow extends StatelessWidget {
       case MessageRole.functionCall:
       case MessageRole.functionResult:
         return 'function';
+      case MessageRole.thinking:
+        return 'thinking';
     }
   }
 }
@@ -733,6 +1102,7 @@ class _Composer extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Icon(
                     Icons.reply,
@@ -741,14 +1111,19 @@ class _Composer extends StatelessWidget {
                   ),
                   const SizedBox(width: 4),
                   Expanded(
-                    child: Text(
-                      'Replying to: ${replyTarget!.content}',
+                    child: Text.rich(
+                      TextSpan(
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                        children: [
+                          const TextSpan(text: 'Replying to '),
+                          TextSpan(text: replyTarget!.content),
+                        ],
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: colorScheme.onSurfaceVariant,
-                      ),
                     ),
                   ),
                   InkWell(
@@ -764,6 +1139,7 @@ class _Composer extends StatelessWidget {
               ),
             ),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
                 child: DecoratedBox(
@@ -771,19 +1147,52 @@ class _Composer extends StatelessWidget {
                     color: colorScheme.surface,
                     borderRadius: BorderRadius.circular(24),
                   ),
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    decoration: const InputDecoration(
-                      hintText: 'Say something…',
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
+                  // Ctrl+Shift+V ("paste plain") — used by dictation tools
+                  // like Vibe Typer. Flutter only binds Ctrl+V / Shift+Insert.
+                  child: Shortcuts(
+                    shortcuts: const <ShortcutActivator, Intent>{
+                      SingleActivator(
+                        LogicalKeyboardKey.keyV,
+                        control: true,
+                        shift: true,
+                      ): PasteTextIntent(SelectionChangedCause.keyboard),
+                    },
+                    // Own FocusNode stays on TextField only — sharing it with
+                    // this Focus wrapper reparents the node onto itself
+                    // ("Tried to make a child into a parent of itself").
+                    child: Focus(
+                      onKeyEvent: (node, event) {
+                        if (event is! KeyDownEvent) {
+                          return KeyEventResult.ignored;
+                        }
+                        final key = event.logicalKey;
+                        final isEnter = key == LogicalKeyboardKey.enter ||
+                            key == LogicalKeyboardKey.numpadEnter;
+                        if (isEnter &&
+                            !HardwareKeyboard.instance.isShiftPressed) {
+                          onSend();
+                          return KeyEventResult.handled;
+                        }
+                        return KeyEventResult.ignored;
+                      },
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.send,
+                        minLines: 1,
+                        maxLines: 8,
+                        decoration: const InputDecoration(
+                          hintText: 'Say something…',
+                          border: InputBorder.none,
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                        ),
                       ),
                     ),
-                    onSubmitted: (_) => onSend(),
                   ),
                 ),
               ),

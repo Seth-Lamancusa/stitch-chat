@@ -26,17 +26,24 @@ abstract class MessageRepository {
 
   Future<Message?> getMessage(String id);
 
-  /// Reply children first (creation order), then stitch children — the
-  /// combined candidate pool an outgoing navigator needs.
+  /// Hidden reply children, then non-hidden replies, then stitch children —
+  /// the combined candidate pool an outgoing navigator needs.
+  /// Default path walks use only the non-hidden reply list.
   Future<OutgoingEdges> getOutgoing(String parentId);
 
-  /// Reply parent first, then stitch parents — the combined pool an incoming
-  /// navigator needs. Reply side has 0-1 elements today (the reply-edge
-  /// schema enforces a single reply parent per child).
+  /// Hidden reply parent, then non-hidden reply parent (0–1 reply parents
+  /// total today), then stitch parents — the combined pool an incoming
+  /// navigator needs.
   Future<IncomingEdges> getIncoming(String childId);
 
   /// Root-to-node ancestry via reply parents, root first.
   Future<List<Message>> getAncestorPath(String messageId);
+
+  /// Absolute thread roots — messages with no reply parent.
+  Future<List<Message>> getThreadRoots();
+
+  /// Reactive [getThreadRoots]; updates when messages or reply edges change.
+  Stream<List<Message>> watchThreadRoots();
 
   /// Reply-only, reactive. Stitch edges aren't merged in here: nothing
   /// currently watches a second reactive stream for a code path with no real
@@ -44,7 +51,13 @@ abstract class MessageRepository {
   /// one-shot reads.
   Stream<List<Message>> watchReplyOutgoing(String parentId);
 
-  Future<void> addReplyEdge(String parentId, String childId);
+  /// [hidden] marks the edge for Surgical Loading–style default skip; see
+  /// [OutgoingEdges.hiddenReplyOutgoing].
+  Future<void> addReplyEdge(
+    String parentId,
+    String childId, {
+    bool hidden = false,
+  });
 
   Future<void> addStitchEdge(String fromId, String toId, {String? createdByAuthorId});
 
@@ -55,4 +68,13 @@ abstract class MessageRepository {
   Future<List<RecipientRef>> getRecipients(String messageId);
 
   Future<void> deleteMessage(String id);
+
+  /// Rewrites identity stamps from [fromAuthorId] to [toAuthorId] across
+  /// message authors, stitch `createdByAuthorId`, and recipient edges.
+  /// Returns the number of message rows updated. No-op when the ids are
+  /// equal or [fromAuthorId] is empty.
+  Future<int> rewriteAuthorId({
+    required String fromAuthorId,
+    required String toAuthorId,
+  });
 }

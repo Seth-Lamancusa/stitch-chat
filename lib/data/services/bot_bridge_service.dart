@@ -1,16 +1,53 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 import '../../core/logging/stitch_log.dart';
+import '../../data/models/message.dart';
 import '../../domain/bot_registry.dart';
 import 'stitch_ws_client.dart';
+import 'typing_cue_store.dart';
 
-/// One completed bot reply from the Python bridge (singular-part for now).
+/// One bot message part from the Python bridge (side-channel or reply branch).
+class BotBridgePart {
+  const BotBridgePart({
+    required this.messageId,
+    required this.parentMessageId,
+    required this.botId,
+    required this.content,
+    required this.role,
+    this.isFinal = false,
+    this.hidden = false,
+    this.usage,
+    this.toolName,
+    this.toolCallId,
+    this.isError,
+  });
+
+  final String messageId;
+  final String parentMessageId;
+  final String botId;
+  final String content;
+  final MessageRole role;
+  final bool isFinal;
+
+  /// When true, the reply edge from [parentMessageId] to this part is hidden
+  /// (default walk skips it; UI must reveal).
+  final bool hidden;
+  final Map<String, dynamic>? usage;
+  final String? toolName;
+  final String? toolCallId;
+  final bool? isError;
+}
+
+/// Terminal outcome of [BotBridgeService.invoke] (final part, skip, or error).
 class BotBridgeReply {
   const BotBridgeReply({
     required this.messageId,
     required this.parentMessageId,
     required this.botId,
     required this.content,
+    this.role = MessageRole.localBot,
     this.usage,
     this.skipped = false,
     this.skipReason,
@@ -20,6 +57,7 @@ class BotBridgeReply {
   final String parentMessageId;
   final String botId;
   final String content;
+  final MessageRole role;
   final Map<String, dynamic>? usage;
 
   /// Bridge declined to run the adapter (e.g. missing cwd). Not a failure.
@@ -27,8 +65,26 @@ class BotBridgeReply {
   final String? skipReason;
 }
 
+MessageRole messageRoleFromWire(String? raw) {
+  switch (raw) {
+    case 'thinking':
+      return MessageRole.thinking;
+    case 'functionCall':
+      return MessageRole.functionCall;
+    case 'functionResult':
+      return MessageRole.functionResult;
+    case 'localBot':
+    case 'bot':
+      return MessageRole.localBot;
+    case 'user':
+      return MessageRole.user;
+    default:
+      return MessageRole.localBot;
+  }
+}
+
 /// Thin facade over [StitchWsClient]: connect, invoke a bot with Stitch
-/// context, correlate start/end/error/skip by parent (trigger) message id.
+/// context, correlate start/end/error/skip by invoke root (trigger) id.
 ///
 /// Session affinity (fingerprint → opaque handle) stays adapter-private on
 /// the Python side. [cwd] is a column tag forwarded on each invoke.
@@ -38,6 +94,7 @@ class BotBridgeService {
   final StitchWsClient _client;
   StreamSubscription<Map<String, dynamic>>? _subscription;
   final _pending = <String, _PendingInvocation>{};
+  final _cueController = StreamController<TypingCueEvent>.broadcast();
   bool _connected = false;
   BotRegistry _registry = const BotRegistry.empty();
 
@@ -46,6 +103,9 @@ class BotBridgeService {
   /// Tag -> bot id lookup derived from the `bots` field of the server's
   /// `ready` envelope. Empty until [connect] completes.
   BotRegistry get registry => _registry;
+
+  /// Fire-and-forget typing cues from the bridge (not tied to invoke Futures).
+  Stream<TypingCueEvent> get cues => _cueController.stream;
 
   Future<void> connect() async {
     if (_connected) return;
@@ -60,18 +120,15 @@ class BotBridgeService {
     StitchLog.hop('dart.bridge', 'ready');
   }
 
-  /// Invokes [botId] with [triggerMessageId] as the parent of emitted
-  /// replies. [context] is the full context window including the trigger
-  /// as its last node. [cwd] is the invoking column's working-directory
-  /// tag (nullable).
-  ///
-  /// A skipped invoke (e.g. `requires_cwd`) returns [BotBridgeReply.skipped]
-  /// rather than throwing.
+  /// Invokes [botId] with [triggerMessageId] as the invoke root.
+  /// Intermediate parts call [onPart]; the Future completes on the final
+  /// part (`is_final`), skip, or error.
   Future<BotBridgeReply> invoke({
     required String botId,
     required String triggerMessageId,
     required List<Map<String, dynamic>> context,
     String? cwd,
+    FutureOr<void> Function(BotBridgePart part)? onPart,
   }) async {
     if (!_connected) {
       throw StateError('BotBridgeService.connect() must complete before invoke');
@@ -80,7 +137,7 @@ class BotBridgeService {
       throw StateError('invocation already pending for $triggerMessageId');
     }
 
-    final pending = _PendingInvocation(botId: botId);
+    final pending = _PendingInvocation(botId: botId, onPart: onPart);
     _pending[triggerMessageId] = pending;
 
     StitchLog.hop(
@@ -124,7 +181,6 @@ class BotBridgeService {
 
   void _onEnvelope(Map<String, dynamic> envelope) {
     final type = envelope['type'] as String?;
-    final parentId = envelope['parent_message_id'] as String?;
     if (type == 'ready') {
       final bots = envelope['bots'];
       if (bots is List) {
@@ -133,10 +189,16 @@ class BotBridgeService {
       StitchLog.hop('dart.bridge', '←py ready bots=${bots is List ? bots.length : 0}');
       return;
     }
-    if (parentId == null) return;
-    final pending = _pending[parentId];
+    if (type == 'cue') {
+      _onCue(envelope);
+      return;
+    }
+
+    final rootId = envelope['invoke_root_id'] as String? ?? envelope['parent_message_id'] as String?;
+    if (rootId == null) return;
+    final pending = _pending[rootId];
     if (pending == null) {
-      StitchLog.hop('dart.bridge', '←py unmatched type=$type parent=$parentId');
+      StitchLog.hop('dart.bridge', '←py unmatched type=$type root=$rootId');
       return;
     }
 
@@ -144,38 +206,52 @@ class BotBridgeService {
       case 'message_start':
         pending.replyMessageId = envelope['message_id'] as String?;
         pending.botId = (envelope['bot_id'] as String?) ?? pending.botId;
+        pending.pendingRole = messageRoleFromWire(envelope['role'] as String?);
         StitchLog.hop(
           'dart.bridge',
-          '←py message_start reply_id=${pending.replyMessageId} parent=$parentId',
+          '←py message_start reply_id=${pending.replyMessageId} root=$rootId parent=${envelope['parent_message_id']}',
         );
       case 'message_end':
-        if (pending.completer.isCompleted) return;
+        final messageId =
+            (envelope['message_id'] as String?) ?? pending.replyMessageId ?? 'srv-unknown';
+        final parentId = (envelope['parent_message_id'] as String?) ?? rootId;
+        final role = messageRoleFromWire(envelope['role'] as String?);
+        final isFinal = envelope.containsKey('is_final')
+            ? envelope['is_final'] == true
+            : true; // legacy single-part adapters omit is_final
+        final part = BotBridgePart(
+          messageId: messageId,
+          parentMessageId: parentId,
+          botId: (envelope['bot_id'] as String?) ?? pending.botId,
+          content: (envelope['content'] as String?) ?? '',
+          role: role,
+          isFinal: isFinal,
+          hidden: envelope['hidden'] == true,
+          usage: envelope['usage'] as Map<String, dynamic>?,
+          toolName: envelope['tool_name'] as String?,
+          toolCallId: envelope['tool_call_id'] as String?,
+          isError: envelope['is_error'] as bool?,
+        );
         StitchLog.hop(
           'dart.bridge',
-          '←py message_end reply_id=${envelope['message_id']} parent=$parentId',
+          '←py message_end reply_id=$messageId root=$rootId parent=$parentId final=$isFinal role=${role.name}',
         );
-        pending.completer.complete(
-          BotBridgeReply(
-            messageId: (envelope['message_id'] as String?) ??
-                pending.replyMessageId ??
-                'srv-unknown',
-            parentMessageId: parentId,
-            botId: (envelope['bot_id'] as String?) ?? pending.botId,
-            content: (envelope['content'] as String?) ?? '',
-            usage: envelope['usage'] as Map<String, dynamic>?,
-          ),
+        // Serialize part delivery so onPart persist/refresh can't race
+        // (concurrent unawaited delivers were clobbering column anchors).
+        pending.deliverChain = pending.deliverChain.then(
+          (_) => _deliverPart(pending, part, isFinal: isFinal),
         );
       case 'invoke_skipped':
         if (pending.completer.isCompleted) return;
         final reason = envelope['reason'] as String? ?? 'skipped';
         StitchLog.hop(
           'dart.bridge',
-          '←py invoke_skipped parent=$parentId reason=$reason',
+          '←py invoke_skipped root=$rootId reason=$reason',
         );
         pending.completer.complete(
           BotBridgeReply(
             messageId: (envelope['message_id'] as String?) ?? 'skipped',
-            parentMessageId: parentId,
+            parentMessageId: rootId,
             botId: (envelope['bot_id'] as String?) ?? pending.botId,
             content: '',
             skipped: true,
@@ -186,11 +262,92 @@ class BotBridgeService {
         if (pending.completer.isCompleted) return;
         StitchLog.hop(
           'dart.bridge',
-          '←py error parent=$parentId err=${envelope['error']}',
+          '←py error root=$rootId err=${envelope['error']}',
         );
         pending.completer.completeError(
           BotBridgeException((envelope['error'] as String?) ?? 'unknown bridge error'),
         );
+    }
+  }
+
+  void _onCue(Map<String, dynamic> envelope) {
+    final authorId = envelope['author_id'] as String?;
+    final targetId = envelope['target_message_id'] as String?;
+    final typing = envelope['typing'];
+    if (authorId == null || targetId == null || typing is! bool) {
+      StitchLog.hop('dart.bridge', '←py cue ignored malformed');
+      return;
+    }
+    StitchLog.hop(
+      'dart.bridge',
+      '←py cue author=$authorId target=$targetId typing=$typing',
+    );
+    if (!_cueController.isClosed) {
+      _cueController.add(
+        TypingCueEvent(
+          authorId: authorId,
+          targetMessageId: targetId,
+          typing: typing,
+        ),
+      );
+    }
+  }
+
+  /// Test harness: feed a cue envelope without a pending invoke.
+  @visibleForTesting
+  void debugEmitEnvelope(Map<String, dynamic> envelope) => _onEnvelope(envelope);
+
+  Future<void> _deliverPart(
+    _PendingInvocation pending,
+    BotBridgePart part, {
+    required bool isFinal,
+  }) async {
+    final onPart = pending.onPart;
+    if (onPart != null) {
+      try {
+        await onPart(part);
+      } catch (e, st) {
+        StitchLog.error(
+          'onPart failed part=${part.messageId}',
+          tag: 'dart.bridge',
+          error: e,
+          stackTrace: st,
+        );
+      }
+    }
+    if (!isFinal) return;
+    if (pending.completer.isCompleted) return;
+    pending.completer.complete(
+      BotBridgeReply(
+        messageId: part.messageId,
+        parentMessageId: part.parentMessageId,
+        botId: part.botId,
+        content: part.content,
+        role: part.role,
+        usage: part.usage,
+      ),
+    );
+  }
+
+  /// Test harness: register a pending invoke and drive envelopes without WS.
+  @visibleForTesting
+  Future<BotBridgeReply> invokeDriven({
+    required String botId,
+    required String triggerMessageId,
+    FutureOr<void> Function(BotBridgePart part)? onPart,
+    required Future<void> Function(void Function(Map<String, dynamic>) emit) drive,
+  }) async {
+    if (_pending.containsKey(triggerMessageId)) {
+      throw StateError('invocation already pending for $triggerMessageId');
+    }
+    final pending = _PendingInvocation(botId: botId, onPart: onPart);
+    _pending[triggerMessageId] = pending;
+    try {
+      await drive(_onEnvelope);
+      await pending.deliverChain;
+      return await pending.completer.future;
+    } finally {
+      _pending.remove(triggerMessageId);
     }
   }
 
@@ -204,6 +361,7 @@ class BotBridgeService {
       }
     }
     _pending.clear();
+    await _cueController.close();
     await _client.close();
     _connected = false;
   }
@@ -218,9 +376,14 @@ class BotBridgeException implements Exception {
 }
 
 class _PendingInvocation {
-  _PendingInvocation({required this.botId});
+  _PendingInvocation({required this.botId, this.onPart});
 
   String botId;
   String? replyMessageId;
+  MessageRole pendingRole = MessageRole.localBot;
+  final FutureOr<void> Function(BotBridgePart part)? onPart;
   final completer = Completer<BotBridgeReply>();
+
+  /// Chains message_end deliveries so onPart runs strictly in order.
+  Future<void> deliverChain = Future.value();
 }

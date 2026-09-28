@@ -33,10 +33,21 @@ class StitchApiMessageRepository implements MessageRepository {
   Future<List<Message>> getAncestorPath(String messageId) => _unimplemented();
 
   @override
+  Future<List<Message>> getThreadRoots() => _unimplemented();
+
+  @override
+  Stream<List<Message>> watchThreadRoots() => _unimplemented();
+
+  @override
   Stream<List<Message>> watchReplyOutgoing(String parentId) => _unimplemented();
 
   @override
-  Future<void> addReplyEdge(String parentId, String childId) => _unimplemented();
+  Future<void> addReplyEdge(
+    String parentId,
+    String childId, {
+    bool hidden = false,
+  }) =>
+      _unimplemented();
 
   @override
   Future<void> addStitchEdge(String fromId, String toId, {String? createdByAuthorId}) =>
@@ -51,6 +62,13 @@ class StitchApiMessageRepository implements MessageRepository {
 
   @override
   Future<void> deleteMessage(String id) => _unimplemented();
+
+  @override
+  Future<int> rewriteAuthorId({
+    required String fromAuthorId,
+    required String toAuthorId,
+  }) =>
+      _unimplemented();
 
   Never _unimplemented() {
     throw UnimplementedError(

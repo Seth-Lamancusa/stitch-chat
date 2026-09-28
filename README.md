@@ -172,6 +172,14 @@ When adding a new adapter or hop, log at `DEBUG` with `hop=<stage> | …` (Dart:
 - Make mouse cursor shape responsive to button hovers (`SystemMouseCursors.click`) generally, not case-by-case.
 
 
+## Build Instructions
+
+### Linux
+
+`dart pub global activate flutter_distributor` if not yet run.
+`flutter_distributor release --name production`
+
+
 ### Resources
 - [Best Practices](./docs/best-practices.md)
 - [Flutter Docs](https://docs.flutter.dev)

@@ -10,12 +10,15 @@ import '../../data/repositories/column_repository.dart';
 import '../../data/repositories/message_repository.dart';
 import '../../data/services/bot_bridge_service.dart';
 import '../../data/services/local_identity_service.dart';
+import '../../data/services/mock_typing_cue.dart';
+import '../../data/services/typing_cue_store.dart';
 import '../../domain/bot_registry.dart';
 import '../../domain/branch_path_service.dart';
 import '../../domain/context_chain.dart';
 import '../../domain/message_store.dart';
 import '../core/adaptive_marker.dart';
 import 'column_ui_state.dart';
+import 'columns_display_mode.dart';
 
 /// How many hops [ColumnsViewModel.loadInitialWindow] resolves in each
 /// direction when a column shows an anchor it hasn't materialized before.
@@ -47,8 +50,17 @@ class ColumnsViewModel extends ChangeNotifier {
     this._identity, {
     BotBridgeService? botBridge,
     NotificationService? notifications,
+    TypingCueStore? typingCues,
+    this.mockTypingCues = false,
   })  : _botBridge = botBridge,
-        _notifications = notifications;
+        _notifications = notifications,
+        typingCues = typingCues ?? TypingCueStore() {
+    final bridge = _botBridge;
+    if (bridge != null) {
+      _cueSubscription = bridge.cues.listen(this.typingCues.apply);
+    }
+    this.typingCues.addListener(notifyListeners);
+  }
 
   final MessageRepository _messages;
   final ColumnRepository _columns;
@@ -57,6 +69,13 @@ class ColumnsViewModel extends ChangeNotifier {
   final LocalIdentityService _identity;
   final BotBridgeService? _botBridge;
   final NotificationService? _notifications;
+  final TypingCueStore typingCues;
+
+  /// When true, honor `[[mockTyping:…]]` markers on message content as
+  /// sticky typing chrome (see [MockTypingCue] / `STITCH_MOCK_TYPING_CUES`).
+  final bool mockTypingCues;
+
+  StreamSubscription<TypingCueEvent>? _cueSubscription;
   static const _uuid = Uuid();
   static const _cwdWarningFadeDelay = Duration(seconds: 4);
 
@@ -67,8 +86,50 @@ class ColumnsViewModel extends ChangeNotifier {
 
   List<ColumnUiState> get columns => List.unmodifiable(_states);
 
-  /// Who "You" refers to in the UI — resolves to the cloud user id once
-  /// cloud auth exists, but is always answerable locally in the meantime.
+  /// Absolute thread roots for the threads menu (reactive).
+  Stream<List<Message>> watchThreadRoots() => _messages.watchThreadRoots();
+
+  /// Stub — wire to open/navigate a column anchored at [root] later.
+  void onThreadRootPreviewTap(Message root) {}
+
+  ColumnsDisplayMode _displayMode = ColumnsDisplayMode.multi;
+
+  ColumnsDisplayMode get displayMode => _displayMode;
+
+  void setDisplayMode(ColumnsDisplayMode mode) {
+    if (_displayMode == mode) return;
+    _displayMode = mode;
+    if (mode == ColumnsDisplayMode.single && _states.isNotEmpty) {
+      setActiveColumn(_states.first.id);
+    }
+    notifyListeners();
+  }
+
+  void toggleDisplayMode() {
+    setDisplayMode(
+      _displayMode == ColumnsDisplayMode.multi
+          ? ColumnsDisplayMode.single
+          : ColumnsDisplayMode.multi,
+    );
+  }
+
+  /// Authors currently typing a reply under [messageId] (live bridge cues).
+  List<String> authorsTypingAt(String messageId) =>
+      typingCues.authorsTypingAt(messageId);
+
+  /// Live cues plus, when [mockTypingCues] is on, authors from a
+  /// `[[mockTyping:…]]` marker on [message] content.
+  List<String> typingAuthorsFor(Message message) {
+    final live = authorsTypingAt(message.id);
+    if (!mockTypingCues) return live;
+    final mock = MockTypingCue.authorsOf(message.content);
+    if (mock.isEmpty) return live;
+    if (live.isEmpty) return List<String>.from(mock)..sort();
+    return {...live, ...mock}.toList()..sort();
+  }
+
+  /// Who "You" refers to in the UI — cloud uid when signed in or after a prior
+  /// login; otherwise the device-local uid until the user signs in once.
   String get currentUserId => _identity.currentUserId;
 
   String? anchorOf(String columnId) => _anchors[columnId];
@@ -89,6 +150,16 @@ class ColumnsViewModel extends ChangeNotifier {
     if (_states.isNotEmpty) _states.first.isActive = true;
     for (final state in _states) {
       await _refresh(state.id, isFreshAnchor: true);
+    }
+    notifyListeners();
+  }
+
+  /// Reloads every column's visible branch from storage — used after
+  /// identity stamps change (local→cloud author promotion) so "You" labels
+  /// and in-memory rows pick up the rewritten [Message.authorId]s.
+  Future<void> reloadAll() async {
+    for (final state in _states) {
+      await _refresh(state.id);
     }
     notifyListeners();
   }
@@ -122,10 +193,15 @@ class ColumnsViewModel extends ChangeNotifier {
   }
 
   void setActiveColumn(String id) {
+    var changed = false;
     for (final state in _states) {
-      state.isActive = state.id == id;
+      final next = state.id == id;
+      if (state.isActive != next) {
+        state.isActive = next;
+        changed = true;
+      }
     }
-    notifyListeners();
+    if (changed) notifyListeners();
   }
 
   Future<void> updateColumnWidth(String id, double? width) async {
@@ -363,8 +439,7 @@ class ColumnsViewModel extends ChangeNotifier {
       await selectCandidate(columnId, parentId, chosenId, Direction.outgoing);
     }
     await _columns.updateColumnAnchor(columnId, parentId);
-    _anchors[columnId] = parentId;
-    await _refresh(columnId);
+    await _refresh(columnId, anchorMessageId: parentId);
     notifyListeners();
   }
 
@@ -387,9 +462,64 @@ class ColumnsViewModel extends ChangeNotifier {
       await selectCandidate(columnId, childId, chosenId, Direction.incoming);
     }
     await _columns.updateColumnAnchor(columnId, childId);
-    _anchors[columnId] = childId;
-    await _refresh(columnId);
+    await _refresh(columnId, anchorMessageId: childId);
     notifyListeners();
+  }
+
+  /// Marker entry point for a stitch boundary above the current top row.
+  Future<void> loadStitchAbove(String columnId) async {
+    final state = _stateFor(columnId);
+    if (state.rows.isEmpty) return;
+    await revealStitch(
+      columnId,
+      state.rows.first.message.id,
+      Direction.incoming,
+    );
+  }
+
+  /// Marker entry point for a stitch boundary below the current bottom row.
+  Future<void> loadStitchBelow(String columnId) async {
+    final state = _stateFor(columnId);
+    if (state.rows.isEmpty) return;
+    await revealStitch(
+      columnId,
+      state.rows.last.message.id,
+      Direction.outgoing,
+    );
+  }
+
+  /// Reveal the first hidden-reply parent above the top boundary.
+  Future<void> loadHiddenAbove(String columnId) =>
+      _revealHidden(columnId, Direction.incoming);
+
+  /// Reveal the first hidden-reply child below the bottom boundary.
+  Future<void> loadHiddenBelow(String columnId) =>
+      _revealHidden(columnId, Direction.outgoing);
+
+  /// One forced hop across a hidden-reply boundary, then a normal
+  /// [defaultPage] batch from the newly revealed node. Mirrors
+  /// [revealStitch] for hidden edges, which [defaultPage] never auto-follows.
+  Future<void> _revealHidden(String columnId, Direction direction) async {
+    final state = _stateFor(columnId);
+    if (state.rows.isEmpty) return;
+    final boundaryId = direction == Direction.incoming
+        ? state.rows.first.message.id
+        : state.rows.last.message.id;
+    _setError(state, direction, null);
+    try {
+      final hidden = direction == Direction.incoming
+          ? (await _messages.getIncoming(boundaryId)).hiddenReplyIncoming
+          : (await _messages.getOutgoing(boundaryId)).hiddenReplyOutgoing;
+      if (hidden.isEmpty) return;
+      final chosen = hidden.first;
+      await selectCandidate(columnId, boundaryId, chosen.id, direction);
+      await defaultPage(columnId, chosen.id, direction, kDefaultBatch);
+    } catch (e) {
+      _setError(state, direction, e.toString());
+    } finally {
+      await _refresh(columnId);
+      notifyListeners();
+    }
   }
 
   /// Marks [messageId] as the parent the next [sendMessage] call in
@@ -418,9 +548,12 @@ class ColumnsViewModel extends ChangeNotifier {
   /// message's pointer at the new message atomically both creates the
   /// branch and switches the column to it — no separate rewrite step is
   /// needed for ancestors, which are untouched, or for the new leaf, which
-  /// has no descendants yet. Advances the column's persisted anchor to the
-  /// new message either way — per column-ui-impl-plan.md §3, "the anchor is
-  /// a persisted, moving reference point."
+  /// has no descendants yet.
+  ///
+  /// Scroll-center anchor: set on the first message in an empty column, and
+  /// moved onto the new message when the reply parent already has a child on
+  /// the visible branch (mid-thread fork) so `_refresh` walks the new fork
+  /// instead of the old tip. Tip appends leave the center where it was.
   ///
   /// When the content tags (or inherits) a known local bot, the visible
   /// branch through the reply target is sent to [_botBridge] and the reply
@@ -437,6 +570,14 @@ class ColumnsViewModel extends ChangeNotifier {
       replyTargetId: parentId,
     );
     final mentions = (_botBridge?.registry ?? const BotRegistry.empty()).parseMentions(content);
+
+    // Parent already shows a descendant on this column — sending under it
+    // forks away from that child; we must retarget the pointer *and* walk
+    // from the new message or refresh would still derive the old tip path.
+    final parentIndex =
+        parentId == null ? -1 : state.rows.indexWhere((r) => r.message.id == parentId);
+    final forksVisibleChild =
+        parentIndex >= 0 && parentIndex < state.rows.length - 1;
 
     StitchLog.hop(
       'dart.column',
@@ -497,9 +638,12 @@ class ColumnsViewModel extends ChangeNotifier {
     }
 
     state.replyingToMessageId = null;
-    await _columns.updateColumnAnchor(columnId, newMessage.id);
-    _anchors[columnId] = newMessage.id;
-    await _refresh(columnId);
+    if (_anchors[columnId] == null || forksVisibleChild) {
+      await _columns.updateColumnAnchor(columnId, newMessage.id);
+      await _refresh(columnId, anchorMessageId: newMessage.id);
+    } else {
+      await _refresh(columnId);
+    }
     notifyListeners();
     StitchLog.hop('dart.column', 'persisted trigger id=${newMessage.id} parent=$parentId');
 
@@ -547,19 +691,20 @@ class ColumnsViewModel extends ChangeNotifier {
           triggerMessageId: newMessage.id,
           context: contextNodes,
           cwd: cwd,
+          onPart: (part) async {
+            await _persistBotPart(columnId, part: part);
+            StitchLog.hop(
+              'dart.column',
+              'persisted bot part id=${part.messageId} parent=${part.parentMessageId} role=${part.role.name} final=${part.isFinal}',
+            );
+          },
         );
         if (reply.skipped) {
           StitchLog.hop(
             'dart.column',
             'bridge skipped bot=$botId reason=${reply.skipReason}',
           );
-          continue;
         }
-        await _persistBotReply(columnId, triggerId: newMessage.id, reply: reply);
-        StitchLog.hop(
-          'dart.column',
-          'persisted bot reply id=${reply.messageId} parent=${newMessage.id} chars=${reply.content.length}',
-        );
       } catch (e, st) {
         StitchLog.error(
           'column=$columnId bot=$botId failed',
@@ -636,35 +781,116 @@ class ColumnsViewModel extends ChangeNotifier {
       timer.cancel();
     }
     _cwdWarningFadeTimers.clear();
+    _cueSubscription?.cancel();
+    typingCues.removeListener(notifyListeners);
+    typingCues.dispose();
     super.dispose();
   }
 
-  Future<void> _persistBotReply(
+  /// Persists a bot part into the message graph and refreshes the column.
+  /// Does not write branch pointers or move the scroll-center anchor — an
+  /// unset tip still picks up a new reply child via
+  /// [BranchPathService]'s most-recent-reply default on walk; an already-
+  /// chosen fork is left alone for sibling navigation (and may toast).
+  Future<void> _persistBotPart(
     String columnId, {
-    required String triggerId,
-    required BotBridgeReply reply,
+    required BotBridgePart part,
   }) async {
     final botMessage = Message(
-      id: reply.messageId,
-      role: MessageRole.localBot,
-      authorId: reply.botId,
-      content: reply.content,
+      id: part.messageId,
+      role: part.role,
+      authorId: part.botId,
+      content: part.content,
       createdAt: DateTime.now().toUtc(),
     );
-    await _messages.saveMessage(botMessage);
-    await _messages.addReplyEdge(triggerId, botMessage.id);
-    await _columns.setBranchPointer(columnId, triggerId, botMessage.id);
-    await _columns.updateColumnAnchor(columnId, botMessage.id);
-    _anchors[columnId] = botMessage.id;
+    await ingestIncomingMessage(
+      columnId: columnId,
+      message: botMessage,
+      parentId: part.parentMessageId,
+      hidden: part.hidden,
+    );
+  }
+
+  /// Shared ingest for local-bot parts and (later) cloud WS arrivals.
+  /// Toasts when an eligible reply (`user` / `localBot`) attaches under the
+  /// column's reply tree but would not appear on the current visible branch
+  /// — thinking/tool roles stay silent.
+  Future<void> ingestIncomingMessage({
+    required String columnId,
+    required Message message,
+    required String parentId,
+    bool hidden = false,
+    bool notifyIfOffPath = true,
+  }) async {
+    await _messages.saveMessage(message);
+    await _messages.addReplyEdge(parentId, message.id, hidden: hidden);
+
+    if (notifyIfOffPath && _isToastEligibleRole(message.role)) {
+      final anchorId = _anchors[columnId];
+      if (anchorId != null) {
+        final treeIds = await _branchPathService.replyTreeIds(anchorId);
+        // Parent was already in the tree before this edge; the new child is
+        // not required to be — we're notifying about its arrival.
+        final parentInTree = treeIds.contains(parentId);
+        final landsOnVisible = parentInTree &&
+            await _branchPathService.wouldLandOnVisibleBranch(
+              columnId,
+              anchorId,
+              parentId,
+              message.id,
+            );
+        if (parentInTree && !landsOnVisible) {
+          final author = message.authorId ?? 'Someone';
+          final content = message.content;
+          final preview =
+              content.length > 60 ? '${content.substring(0, 60)}...' : content;
+          _notifications?.show(
+            preview.isEmpty ? 'New message' : preview,
+            title: 'New message from $author',
+            onTap: () => _jumpToOffPathMessage(
+              columnId: columnId,
+              parentId: parentId,
+              messageId: message.id,
+            ),
+          );
+        }
+      }
+    }
+
     await _refresh(columnId);
+    notifyListeners();
+  }
+
+  static bool _isToastEligibleRole(MessageRole role) =>
+      role == MessageRole.user || role == MessageRole.localBot;
+
+  Future<void> _jumpToOffPathMessage({
+    required String columnId,
+    required String parentId,
+    required String messageId,
+  }) async {
+    await _columns.setBranchPointer(columnId, parentId, messageId);
+    await _columns.updateColumnAnchor(columnId, messageId);
+    await _refresh(columnId, anchorMessageId: messageId);
     notifyListeners();
   }
 
   ColumnUiState _stateFor(String id) => _states.firstWhere((s) => s.id == id);
 
-  Future<void> _refresh(String columnId, {bool isFreshAnchor = false}) async {
+  /// Re-derives [columnId]'s rows from [anchorMessageId] (or the current
+  /// in-memory anchor). All awaits finish first; `_anchors` and `state.rows`
+  /// flip together in one synchronous commit so a cue-driven rebuild never
+  /// sees a new anchor against stale rows.
+  ///
+  /// [isFreshAnchor] materializes the initial window before the pointer walk
+  /// — a column showing an anchor it has not materialized before.
+  Future<void> _refresh(
+    String columnId, {
+    String? anchorMessageId,
+    bool isFreshAnchor = false,
+  }) async {
     final state = _stateFor(columnId);
-    final anchorId = _anchors[columnId];
+    final anchorId = anchorMessageId ?? _anchors[columnId];
 
     if (anchorId == null) {
       state.rows = const [];
@@ -672,6 +898,8 @@ class ColumnsViewModel extends ChangeNotifier {
       state.bottomMarker = MarkerVisualState.end;
       state.topStitchCount = 0;
       state.bottomStitchCount = 0;
+      state.topHiddenCount = 0;
+      state.bottomHiddenCount = 0;
       return;
     }
 
@@ -722,33 +950,55 @@ class ColumnsViewModel extends ChangeNotifier {
         ),
       );
     }
-    state.rows = rows;
 
-    if (branch.isEmpty) {
-      state.topMarker = MarkerVisualState.end;
-      state.bottomMarker = MarkerVisualState.end;
-      state.topStitchCount = 0;
-      state.bottomStitchCount = 0;
-      return;
+    var topStitchCount = 0;
+    var bottomStitchCount = 0;
+    var topHiddenCount = 0;
+    var bottomHiddenCount = 0;
+    var topMarker = MarkerVisualState.end;
+    var bottomMarker = MarkerVisualState.end;
+    if (branch.isNotEmpty) {
+      // A reply candidate means the window can still extend (waiting).
+      // Stitch and hidden counts surface only at a reply dead-end.
+      final top = await _branchPathService.candidatesAt(
+        branch.first.id,
+        Direction.incoming,
+      );
+      topStitchCount = top.stitchCandidates.length;
+      topMarker = top.replyCandidate != null
+          ? MarkerVisualState.waiting
+          : MarkerVisualState.end;
+      if (top.replyCandidate == null) {
+        topHiddenCount = (await _messages.getIncoming(
+          branch.first.id,
+        )).hiddenReplyIncoming.length;
+      }
+
+      final bottom = await _branchPathService.candidatesAt(
+        branch.last.id,
+        Direction.outgoing,
+      );
+      bottomStitchCount = bottom.stitchCandidates.length;
+      bottomMarker = bottom.replyCandidate != null
+          ? MarkerVisualState.waiting
+          : MarkerVisualState.end;
+      if (bottom.replyCandidate == null) {
+        bottomHiddenCount = (await _messages.getOutgoing(
+          branch.last.id,
+        )).hiddenReplyOutgoing.length;
+      }
     }
 
-    final top = await _branchPathService.candidatesAt(
-      branch.first.id,
-      Direction.incoming,
-    );
-    state.topStitchCount = top.stitchCandidates.length;
-    state.topMarker = top.replyCandidate != null
-        ? MarkerVisualState.waiting
-        : MarkerVisualState.end;
-
-    final bottom = await _branchPathService.candidatesAt(
-      branch.last.id,
-      Direction.outgoing,
-    );
-    state.bottomStitchCount = bottom.stitchCandidates.length;
-    state.bottomMarker = bottom.replyCandidate != null
-        ? MarkerVisualState.waiting
-        : MarkerVisualState.end;
+    if (anchorMessageId != null) {
+      _anchors[columnId] = anchorMessageId;
+    }
+    state.rows = rows;
+    state.topMarker = topMarker;
+    state.bottomMarker = bottomMarker;
+    state.topStitchCount = topStitchCount;
+    state.bottomStitchCount = bottomStitchCount;
+    state.topHiddenCount = topHiddenCount;
+    state.bottomHiddenCount = bottomHiddenCount;
   }
 }
 
