@@ -126,3 +126,12 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# Bundle the Python bridge server (including its venv) so the packaged app
+# doesn't depend on `flutter run`'s dev-mode cwd to find it. StitchEnv looks
+# for this at "<executable dir>/data/python-server" at runtime.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../python-server"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+  COMPONENT Runtime
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)

@@ -9,10 +9,10 @@ const _serverPort = 8765;
 
 /// Spawns, health-checks, and tears down the local Python server subprocess.
 ///
-/// Dev-mode only: assumes `flutter run` is launched from the project root
-/// (so `Directory.current` resolves to it) and that `python-server/venv`
-/// already has dependencies installed. PyInstaller/bundled-binary lookup is
-/// deferred until packaging is actually needed.
+/// Locates `python-server` via [StitchEnv.pythonServerDir]: the bundled copy
+/// next to the executable in a packaged build, or `<projectRoot>/python-server`
+/// in dev mode (`flutter run` from the repo root). Either way, that
+/// directory's `venv` must already have dependencies installed.
 class PythonProcessService {
   Process? _process;
 
@@ -23,8 +23,7 @@ class PythonProcessService {
     await _killExistingOnPort(_serverPort);
 
     final stitchEnv = env ?? StitchEnv.load();
-    final projectRoot = stitchEnv.projectRoot;
-    final serverDir = Directory('$projectRoot/python-server');
+    final serverDir = Directory(stitchEnv.pythonServerDir);
     final pythonBin = '${serverDir.path}/venv/bin/python';
 
     await Directory(stitchEnv.logDir).create(recursive: true);

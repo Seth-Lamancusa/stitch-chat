@@ -45,6 +45,20 @@ class StitchEnv {
 
   String? operator [](String key) => values[key];
 
+  /// Directory containing the Python bridge server + its venv.
+  ///
+  /// In a packaged Linux build, `flutter_distributor`/CMake installs
+  /// `python-server` next to the executable under `data/`. When that's
+  /// present, prefer it (the executable's cwd is unreliable when launched
+  /// from an AppImage or a desktop shortcut). Otherwise fall back to
+  /// dev-mode's `<projectRoot>/python-server` (`flutter run` from the repo
+  /// root).
+  String get pythonServerDir {
+    final bundled = p.join(p.dirname(Platform.resolvedExecutable), 'data', 'python-server');
+    if (Directory(bundled).existsSync()) return bundled;
+    return p.join(projectRoot, 'python-server');
+  }
+
   /// Backend origin for `/v1/...` calls. Trailing slashes stripped.
   ///
   /// Defaults to [defaultApiBaseUrl] (production). Set `STITCH_API_URL` only
