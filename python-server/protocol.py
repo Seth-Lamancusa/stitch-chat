@@ -13,6 +13,17 @@ Optional `user_message.cwd` is a column tag (filesystem path or empty),
 passed at invoke time — not message state. Bots that advertise
 `requires_cwd` must receive it; the bridge responds with
 `invoke_skipped` (not `error`) and does not run the adapter.
+
+Multi-part bot turns (Cursor side-channel) may emit several
+`message_start`/`message_end` pairs per invoke. Optional fields:
+  - `role`: thinking | functionCall | functionResult | localBot
+  - `invoke_root_id`: trigger id for correlation when parent_message_id
+    chains under a prior part of the same invoke
+  - `is_final`: true on the last reply-branch message_end (completes invoke)
+  - `tool_name` / `tool_call_id` / `is_error`: tool metadata on function parts
+  - `hidden`: true on message_end when the reply edge from
+    parent_message_id → this message should be skipped by default path
+    walks (first Cursor side-fork hop). Dart persists it on ReplyEdges.
 """
 
 from dataclasses import dataclass
@@ -23,8 +34,29 @@ MESSAGE_START = "message_start"
 MESSAGE_END = "message_end"
 INVOKE_SKIPPED = "invoke_skipped"
 ERROR = "error"
+CUE = "cue"
 
 DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def cue_envelope(
+    *,
+    author_id: str,
+    target_message_id: str,
+    typing: bool,
+) -> dict:
+    """Ephemeral typing cue — not a graph node, never persisted.
+
+    Keyed by (author_id, target_message_id). typing=True turns the cue on;
+    typing=False clears that key only. The same author may have several active
+    targets (parallel invokes).
+    """
+    return {
+        "type": CUE,
+        "author_id": author_id,
+        "target_message_id": target_message_id,
+        "typing": typing,
+    }
 
 
 @dataclass(frozen=True)

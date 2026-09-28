@@ -1,0 +1,27 @@
+display_name: Stitch Chat
+package_name: stitch-chat
+
+maintainer:
+  name: Seth
+  email: sethlamancusa@gmail.com
+
+priority: optional
+section: x11
+installed_size: 80000
+essential: false
+
+icon: assets/images/stitch_logo.png
+
+keywords:
+  - Stitch
+  - Chat
+  - AI
+  - Agent
+
+generic_name: Chat Application
+
+categories:
+  - Network
+  - Utility
+
+startup_notify: true

@@ -47,6 +47,17 @@ void main() {
     expect(await repo.getMessage('missing'), isNull);
   });
 
+  test('getThreadRoots returns messages with no reply parent, newest first', () async {
+    await repo.saveMessage(msg('root-old', createdAt: DateTime.utc(2026, 1, 1)));
+    await repo.saveMessage(msg('root-new', createdAt: DateTime.utc(2026, 1, 3)));
+    await repo.saveMessage(msg('child', createdAt: DateTime.utc(2026, 1, 2)));
+    await repo.addReplyEdge('root-old', 'child');
+
+    final roots = await repo.getThreadRoots();
+
+    expect(roots.map((m) => m.id).toList(), ['root-new', 'root-old']);
+  });
+
   test('getOutgoing returns reply children before stitch children, each ordered by createdAt', () async {
     await repo.saveMessage(msg('root', createdAt: DateTime.utc(2026, 1, 1)));
     await repo.saveMessage(msg('r2', createdAt: DateTime.utc(2026, 1, 3)));
@@ -60,8 +71,23 @@ void main() {
     final outgoing = await repo.getOutgoing('root');
 
     expect(outgoing.replyOutgoing.map((m) => m.id).toList(), ['r1', 'r2']);
+    expect(outgoing.hiddenReplyOutgoing, isEmpty);
     expect(outgoing.stitchedOutgoing.map((m) => m.id).toList(), ['s1']);
     expect(outgoing.all.map((m) => m.id).toList(), ['r1', 'r2', 's1']);
+  });
+
+  test('getOutgoing splits hidden reply children after visible replies', () async {
+    await repo.saveMessage(msg('root', createdAt: DateTime.utc(2026, 1, 1)));
+    await repo.saveMessage(msg('vis', createdAt: DateTime.utc(2026, 1, 2)));
+    await repo.saveMessage(msg('hid', createdAt: DateTime.utc(2026, 1, 3)));
+
+    await repo.addReplyEdge('root', 'vis');
+    await repo.addReplyEdge('root', 'hid', hidden: true);
+
+    final outgoing = await repo.getOutgoing('root');
+    expect(outgoing.replyOutgoing.map((m) => m.id).toList(), ['vis']);
+    expect(outgoing.hiddenReplyOutgoing.map((m) => m.id).toList(), ['hid']);
+    expect(outgoing.all.map((m) => m.id).toList(), ['hid', 'vis']);
   });
 
   test('getIncoming returns the reply parent before stitch parents', () async {
@@ -127,9 +153,48 @@ void main() {
     await repo.addRecipientEdge('m1', 'local:opencode', RecipientKind.localBot);
     await repo.addRecipientEdge('m1', 'local:opencode', RecipientKind.localBot);
 
-    final rows = await db.select(db.recipientEdges).get();
-    expect(rows, hasLength(1));
-    expect(rows.single.kind, RecipientKind.localBot);
+    final recipients = await repo.getRecipients('m1');
+    expect(recipients, hasLength(1));
+    expect(recipients.single.recipientId, 'local:opencode');
+    expect(recipients.single.kind, RecipientKind.localBot);
+  });
+
+  test('rewriteAuthorId updates matching message authors and is idempotent', () async {
+    await repo.saveMessage(Message(
+      id: 'mine',
+      role: MessageRole.user,
+      authorId: 'local-uid',
+      content: 'hi',
+      createdAt: DateTime.utc(2026, 1, 1),
+    ));
+    await repo.saveMessage(Message(
+      id: 'bot',
+      role: MessageRole.localBot,
+      authorId: 'cursor',
+      content: 'yo',
+      createdAt: DateTime.utc(2026, 1, 2),
+    ));
+    await repo.addStitchEdge('mine', 'bot', createdByAuthorId: 'local-uid');
+    await repo.addRecipientEdge('bot', 'local-uid', RecipientKind.cloudUser);
+
+    final n = await repo.rewriteAuthorId(
+      fromAuthorId: 'local-uid',
+      toAuthorId: 'cloud-uid',
+    );
+    expect(n, 1);
+    expect((await repo.getMessage('mine'))!.authorId, 'cloud-uid');
+    expect((await repo.getMessage('bot'))!.authorId, 'cursor');
+
+    final recipients = await repo.getRecipients('bot');
+    expect(recipients.single.recipientId, 'cloud-uid');
+
+    expect(
+      await repo.rewriteAuthorId(
+        fromAuthorId: 'local-uid',
+        toAuthorId: 'cloud-uid',
+      ),
+      0,
+    );
   });
 
   test('watchReplyOutgoing emits an updated list when a reply edge is added', () async {

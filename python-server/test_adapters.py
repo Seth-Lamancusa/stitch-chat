@@ -23,7 +23,7 @@ def test_cursor_does_not_require_cwd():
     assert protocol.BOTS_REQUIRING_CWD == frozenset()
 
 
-def test_cursor_shim_emits_start_end_with_usage():
+def test_cursor_shim_fallback_reply_when_no_progress():
     sent: list[dict] = []
 
     async def send(envelope: dict) -> None:
@@ -32,9 +32,11 @@ def test_cursor_shim_emits_start_end_with_usage():
     fake_result = {
         "ok": True,
         "status": "finished",
+        "event": "done",
         "text": "hello from cursor",
         "mode": "miss",
         "agent_id": "agent-test",
+        "assistant_message_id": "srv-fallback",
         "usage": {
             "prompt_tokens": 10,
             "completion_tokens": 4,
@@ -46,9 +48,12 @@ def test_cursor_shim_emits_start_end_with_usage():
         },
     }
 
+    async def fake_invoke_stream(payload, on_progress):
+        return fake_result
+
     with patch(
-        "cursor_adapter._SESSION.invoke",
-        new=AsyncMock(return_value=fake_result),
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke_stream),
     ) as invoke:
         asyncio.run(
             cursor_handle(
@@ -70,15 +75,139 @@ def test_cursor_shim_emits_start_end_with_usage():
     assert invoke.await_count == 1
     req = invoke.await_args.args[0]
     assert req["cwd"] == "/tmp/proj"
-    assert req["assistant_message_id"].startswith("srv-")
-    assert len(sent) == 2
-    assert sent[0]["type"] == protocol.MESSAGE_START
-    assert sent[0]["role"] == "localBot"
-    assert sent[0]["parent_message_id"] == "trig-1"
-    assert sent[1]["type"] == protocol.MESSAGE_END
-    assert sent[1]["content"] == "hello from cursor"
-    assert sent[1]["usage"]["input_tokens"] == 10
-    assert sent[0]["message_id"] == sent[1]["message_id"] == req["assistant_message_id"]
+    cues = [e for e in sent if e["type"] == protocol.CUE]
+    assert cues[0] == protocol.cue_envelope(
+        author_id="cursor", target_message_id="trig-1", typing=True
+    )
+    assert cues[-1] == protocol.cue_envelope(
+        author_id="cursor", target_message_id="trig-1", typing=False
+    )
+    assert all(c["typing"] is True for c in cues[:-1])
+    messages = [e for e in sent if e["type"] != protocol.CUE]
+    assert len(messages) == 2
+    assert messages[0]["type"] == protocol.MESSAGE_START
+    assert messages[0]["role"] == "localBot"
+    assert messages[0]["parent_message_id"] == "trig-1"
+    assert messages[0]["invoke_root_id"] == "trig-1"
+    assert messages[1]["type"] == protocol.MESSAGE_END
+    assert messages[1]["content"] == "hello from cursor"
+    assert messages[1]["is_final"] is True
+    assert messages[1]["usage"]["input_tokens"] == 10
+
+
+def test_cursor_shim_dual_chain_buffers_last_reply():
+    sent: list[dict] = []
+
+    async def send(envelope: dict) -> None:
+        sent.append(envelope)
+
+    async def fake_invoke_stream(payload, on_progress):
+        await on_progress(
+            {
+                "kind": "thinking",
+                "branch": "side",
+                "message_id": "srv-think",
+                "content": "hmm",
+            }
+        )
+        await on_progress(
+            {
+                "kind": "functionCall",
+                "branch": "side",
+                "message_id": "srv-call",
+                "content": "**read**\n\n```json\n{}\n```",
+                "tool_name": "read",
+                "tool_call_id": "c1",
+            }
+        )
+        await on_progress(
+            {
+                "kind": "functionResult",
+                "branch": "side",
+                "message_id": "srv-result",
+                "content": "```\nfile contents\n```",
+                "tool_name": "read",
+                "tool_call_id": "c1",
+            }
+        )
+        await on_progress(
+            {
+                "kind": "localBot",
+                "branch": "reply",
+                "message_id": "srv-a1",
+                "content": "first",
+            }
+        )
+        await on_progress(
+            {
+                "kind": "localBot",
+                "branch": "reply",
+                "message_id": "srv-a2",
+                "content": "second",
+            }
+        )
+        return {
+            "ok": True,
+            "status": "finished",
+            "event": "done",
+            "text": "second",
+            "mode": "miss",
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            "reply_message_ids": ["srv-a1", "srv-a2"],
+        }
+
+    with patch(
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke_stream),
+    ):
+        asyncio.run(
+            cursor_handle(
+                parent_message_id="trig-1",
+                bot_id="cursor",
+                context=[{"id": "trig-1", "role": "user", "content": "@cursor x"}],
+                send=send,
+                cwd="/tmp/proj",
+            )
+        )
+
+    # Side: think, call, result — each start+end immediately (6).
+    # Reply: a1 start, a1 end (flushed when a2 starts), a2 start, a2 end final (4).
+    messages = [e for e in sent if e["type"] != protocol.CUE]
+    types = [e["type"] for e in messages]
+    assert types.count(protocol.MESSAGE_START) == 5
+    assert types.count(protocol.MESSAGE_END) == 5
+
+    by_id = {
+        e["message_id"]: e
+        for e in messages
+        if e["type"] == protocol.MESSAGE_END
+    }
+    assert by_id["srv-think"]["parent_message_id"] == "trig-1"
+    assert by_id["srv-think"]["role"] == "thinking"
+    assert by_id["srv-think"].get("is_final") is False
+    assert by_id["srv-think"].get("hidden") is True
+    assert by_id["srv-call"]["parent_message_id"] == "srv-think"
+    assert by_id["srv-call"].get("hidden") is not True
+    assert by_id["srv-result"]["parent_message_id"] == "srv-call"
+    assert by_id["srv-result"].get("hidden") is not True
+    assert by_id["srv-a1"]["parent_message_id"] == "trig-1"
+    assert by_id["srv-a1"]["role"] == "localBot"
+    assert by_id["srv-a1"].get("is_final") is False
+    assert by_id["srv-a1"].get("hidden") is not True
+    assert by_id["srv-a2"]["parent_message_id"] == "srv-a1"
+    assert by_id["srv-a2"]["is_final"] is True
+    assert by_id["srv-a2"]["usage"]["total_tokens"] == 3
+    assert all(e.get("invoke_root_id") == "trig-1" for e in messages)
+
+    # Typing stays on the trigger for the whole invoke; progress refreshes
+    # the cue (Dart TTL); clears only after the final assistant message_end.
+    cues = [e for e in sent if e["type"] == protocol.CUE]
+    assert all(c["target_message_id"] == "trig-1" for c in cues)
+    assert cues[0]["typing"] is True
+    assert cues[-1]["typing"] is False
+    assert all(c["typing"] is True for c in cues[:-1])
+    # Initial + refresh per progress part + refresh after runner before final flush.
+    assert len(cues) == 8
 
 
 def test_cursor_shim_maps_runner_failure_to_error():
@@ -87,15 +216,16 @@ def test_cursor_shim_maps_runner_failure_to_error():
     async def send(envelope: dict) -> None:
         sent.append(envelope)
 
+    async def fake_invoke_stream(payload, on_progress):
+        return {
+            "ok": False,
+            "error": "run status=error",
+            "error_kind": "run",
+        }
+
     with patch(
-        "cursor_adapter._SESSION.invoke",
-        new=AsyncMock(
-            return_value={
-                "ok": False,
-                "error": "run status=error",
-                "error_kind": "run",
-            }
-        ),
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke_stream),
     ):
         asyncio.run(
             cursor_handle(
@@ -107,9 +237,16 @@ def test_cursor_shim_maps_runner_failure_to_error():
             )
         )
 
-    assert len(sent) == 1
-    assert sent[0]["type"] == protocol.ERROR
-    assert "run status=error" in sent[0]["error"]
+    assert [e["type"] for e in sent] == [
+        protocol.CUE,
+        protocol.ERROR,
+        protocol.CUE,
+    ]
+    assert sent[0]["typing"] is True
+    assert "run status=error" in sent[1]["error"]
+    assert sent[1]["invoke_root_id"] == "trig-2"
+    assert sent[2]["typing"] is False
+    assert sent[2]["target_message_id"] == "trig-2"
 
 
 def test_cursor_shim_expands_tilde_cwd():
@@ -118,16 +255,18 @@ def test_cursor_shim_expands_tilde_cwd():
     async def send(envelope: dict) -> None:
         sent.append(envelope)
 
+    async def fake_invoke_stream(payload, on_progress):
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "tilde-ok",
+            "mode": "miss",
+            "assistant_message_id": "srv-tilde",
+        }
+
     with patch(
-        "cursor_adapter._SESSION.invoke",
-        new=AsyncMock(
-            return_value={
-                "ok": True,
-                "status": "finished",
-                "text": "tilde-ok",
-                "mode": "miss",
-            }
-        ),
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke_stream),
     ) as invoke:
         asyncio.run(
             cursor_handle(
@@ -141,22 +280,150 @@ def test_cursor_shim_expands_tilde_cwd():
 
     expected = str((Path.home() / "stitch" / "stitch-chat").resolve())
     assert invoke.await_args.args[0]["cwd"] == expected
+
+
+def test_cursor_shim_parallel_invokes_do_not_block_each_other():
+    """Each invoke uses its own subprocess; mocks may overlap."""
+    order: list[str] = []
+
+    async def send_a(envelope: dict) -> None:
+        order.append(f"a:{envelope['type']}")
+
+    async def send_b(envelope: dict) -> None:
+        order.append(f"b:{envelope['type']}")
+
+    async def slow_invoke(payload, on_progress):
+        await asyncio.sleep(0.05)
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "a-ok",
+            "mode": "miss",
+            "assistant_message_id": "srv-a",
+        }
+
+    async def fast_invoke(payload, on_progress):
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "b-ok",
+            "mode": "miss",
+            "assistant_message_id": "srv-b",
+        }
+
+    calls = 0
+
+    async def invoke_router(payload, on_progress):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return await slow_invoke(payload, on_progress)
+        return await fast_invoke(payload, on_progress)
+
+    with patch(
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=invoke_router),
+    ):
+        async def run_both() -> None:
+            await asyncio.gather(
+                cursor_handle(
+                    parent_message_id="trig-a",
+                    bot_id="cursor",
+                    context=[{"id": "trig-a", "role": "user", "content": "@cursor a"}],
+                    send=send_a,
+                    cwd="/tmp/proj",
+                ),
+                cursor_handle(
+                    parent_message_id="trig-b",
+                    bot_id="cursor",
+                    context=[{"id": "trig-b", "role": "user", "content": "@cursor b"}],
+                    send=send_b,
+                    cwd="/tmp/proj",
+                ),
+            )
+
+        asyncio.run(run_both())
+
+    assert calls == 2
+    # Fast invoke (b) should finish before slow (a) despite starting second.
+    b_final_idx = next(
+        i for i, e in enumerate(order) if e == "b:message_end"
+    )
+    a_final_idx = next(
+        i for i, e in enumerate(order) if e == "a:message_end"
+    )
+    assert b_final_idx < a_final_idx
+
+
+def test_cursor_shim_typing_clears_after_final_message_end():
     sent: list[dict] = []
 
     async def send(envelope: dict) -> None:
         sent.append(envelope)
 
-    fake_result = {
-        "ok": True,
-        "status": "finished",
-        "text": "home-ok",
-        "mode": "miss",
-        "usage": None,
-    }
+    async def fake_invoke(payload, on_progress):
+        await on_progress(
+            {
+                "kind": "localBot",
+                "branch": "reply",
+                "message_id": "srv-a1",
+                "content": "done",
+            }
+        )
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "done",
+            "mode": "miss",
+            "usage": {"total_tokens": 1},
+        }
 
     with patch(
-        "cursor_adapter._SESSION.invoke",
-        new=AsyncMock(return_value=fake_result),
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke),
+    ):
+        asyncio.run(
+            cursor_handle(
+                parent_message_id="trig-5",
+                bot_id="cursor",
+                context=[{"id": "trig-5", "role": "user", "content": "@cursor x"}],
+                send=send,
+                cwd="/tmp/proj",
+            )
+        )
+
+    final_end_idx = next(
+        i
+        for i, e in enumerate(sent)
+        if e.get("type") == protocol.MESSAGE_END and e.get("is_final") is True
+    )
+    clear_idx = next(
+        i
+        for i, e in enumerate(sent)
+        if e.get("type") == protocol.CUE and e.get("typing") is False
+    )
+    assert final_end_idx < clear_idx
+
+
+def test_cursor_shim_defaults_cwd_to_home():
+    sent: list[dict] = []
+
+    async def send(envelope: dict) -> None:
+        sent.append(envelope)
+
+    async def fake_invoke_stream(payload, on_progress):
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "home-ok",
+            "mode": "miss",
+            "usage": None,
+            "assistant_message_id": "srv-home",
+        }
+
+    with patch(
+        "cursor_adapter._invoke_runner_once",
+        new=AsyncMock(side_effect=fake_invoke_stream),
     ) as invoke:
         asyncio.run(
             cursor_handle(
@@ -170,7 +437,14 @@ def test_cursor_shim_expands_tilde_cwd():
 
     invoke.assert_awaited_once()
     assert invoke.await_args.args[0]["cwd"] == str(Path.home().resolve())
-    assert [e["type"] for e in sent] == [
-        protocol.MESSAGE_START,
-        protocol.MESSAGE_END,
-    ]
+    types = [e["type"] for e in sent]
+    assert types[0] == protocol.CUE
+    assert types[-1] == protocol.CUE
+    assert protocol.MESSAGE_START in types
+    final_end = next(e for e in sent if e.get("type") == protocol.MESSAGE_END)
+    assert final_end["is_final"] is True
+    assert sent[0]["typing"] is True
+    assert sent[-1]["typing"] is False
+    final_end_idx = sent.index(final_end)
+    clear_idx = len(sent) - 1
+    assert final_end_idx < clear_idx

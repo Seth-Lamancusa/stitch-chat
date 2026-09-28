@@ -38,6 +38,11 @@ class ReplyEdges extends Table {
   @ReferenceName('replyEdgesAsChild')
   TextColumn get childId => text().references(Messages, #id, onDelete: KeyAction.cascade)();
 
+  /// When true, default path walks skip this hop; UI must explicitly reveal
+  /// (AdaptiveMarker / sibling nav). Stays true after reveal — visibility is
+  /// column pointer state, not a cleared flag.
+  BoolColumn get hidden => boolean().withDefault(const Constant(false))();
+
   @override
   Set<Column> get primaryKey => {childId};
 }
@@ -123,7 +128,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(

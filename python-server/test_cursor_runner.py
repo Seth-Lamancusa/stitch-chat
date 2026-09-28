@@ -118,6 +118,144 @@ def test_advance_only_current_prefix_hits(runner):
     assert fp2 in state.by_fingerprint
 
 
+def test_advance_with_reply_nodes(runner):
+    state = runner.RunnerState()
+    cwd = "/tmp/proj"
+    nodes = [{"id": "u1", "role": "user", "author_id": "", "content": "hi"}]
+    reply = [
+        {
+            "id": "a1",
+            "role": "localBot",
+            "author_id": "cursor",
+            "content": "first",
+        },
+        {
+            "id": "a2",
+            "role": "localBot",
+            "author_id": "cursor",
+            "content": "second",
+        },
+    ]
+    fp = state.advance(
+        agent_id="agent-1",
+        cwd=cwd,
+        request_nodes=nodes,
+        reply_nodes=reply,
+    )
+    last = state.by_fingerprint[fp].last_known_prefix
+    assert [n["id"] for n in last] == ["u1", "a1", "a2"]
+    # Side-fork nodes are not in last_known — only reply branch.
+    assert all(n["role"] == "localBot" or n["id"] == "u1" for n in last)
+
+
+def test_conversation_step_to_parts_completed_granularity(runner):
+    class ThinkingMsg:
+        text = "full reasoning about the task"
+
+    class ThinkingStep:
+        type = "thinkingMessage"
+        message = ThinkingMsg()
+
+    class AsstMsg:
+        text = "Here is the complete reply."
+
+    class AsstStep:
+        type = "assistantMessage"
+        message = AsstMsg()
+
+    class ToolStep:
+        type = "toolCall"
+        message = {
+            "type": "read",
+            "args": {"path": "a.py"},
+            "result": "print(1)\n",
+            "callId": "c1",
+        }
+
+    think = runner.conversation_step_to_parts(ThinkingStep())
+    assert len(think) == 1
+    assert think[0]["kind"] == "thinking"
+    assert think[0]["content"] == "full reasoning about the task"
+
+    asst = runner.conversation_step_to_parts(AsstStep())
+    assert len(asst) == 1
+    assert asst[0]["kind"] == "localBot"
+    assert asst[0]["branch"] == "reply"
+    assert asst[0]["content"] == "Here is the complete reply."
+
+    tools = runner.conversation_step_to_parts(ToolStep())
+    assert len(tools) == 2
+    assert tools[0]["kind"] == "functionCall"
+    assert tools[0]["tool_name"] == "read"
+    assert "**read**" in tools[0]["content"]
+    assert "```json" in tools[0]["content"]
+    assert '"path"' in tools[0]["content"]
+    assert tools[1]["kind"] == "functionResult"
+    assert "```" in tools[1]["content"]
+    assert "print(1)" in tools[1]["content"]
+
+
+def test_format_function_call_markdown(runner):
+    text = runner._format_function_call("grep", {"pattern": "foo"})
+    assert text.startswith("**grep**")
+    assert "```json" in text
+    assert '"pattern"' in text
+
+
+def test_sdk_message_to_parts_thinking_tool_assistant(runner):
+    class Thinking:
+        type = "thinking"
+        text = "reason"
+
+    class ToolRunning:
+        type = "tool_call"
+        status = "running"
+        name = "read"
+        call_id = "c1"
+        args = {"path": "a.py"}
+        result = None
+
+    class ToolDone:
+        type = "tool_call"
+        status = "completed"
+        name = "read"
+        call_id = "c1"
+        args = None
+        result = "ok"
+
+    class TextBlock:
+        type = "text"
+        text = "hello"
+
+    class MsgContent:
+        content = [TextBlock()]
+
+    class Assistant:
+        type = "assistant"
+        message = MsgContent()
+
+    think = runner.sdk_message_to_parts(Thinking())
+    assert len(think) == 1
+    assert think[0]["kind"] == "thinking"
+    assert think[0]["branch"] == "side"
+
+    call = runner.sdk_message_to_parts(ToolRunning())
+    assert call[0]["kind"] == "functionCall"
+    assert call[0]["tool_name"] == "read"
+    assert "**read**" in call[0]["content"]
+
+    result = runner.sdk_message_to_parts(ToolDone())
+    assert result[0]["kind"] == "functionResult"
+    assert result[0]["is_error"] is False
+    assert "```" in result[0]["content"]
+
+    asst = runner.sdk_message_to_parts(Assistant())
+    assert len(asst) == 1
+    assert asst[0]["kind"] == "localBot"
+    assert asst[0]["branch"] == "reply"
+    assert asst[0]["content"] == "hello"
+
+
 def test_usage_to_dict_maps_sdk_fields(runner):
     class U:
         input_tokens = 3

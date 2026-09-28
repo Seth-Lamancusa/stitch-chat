@@ -25,11 +25,25 @@ class MessageCard extends StatelessWidget {
   final String currentUserId;
   final VoidCallback? onReply;
 
-  const MessageCard({super.key, required this.message, required this.currentUserId, this.onReply});
+  /// Authors currently typing a reply under this message (ephemeral cues).
+  final List<String> typingAuthors;
+
+  const MessageCard({
+    super.key,
+    required this.message,
+    required this.currentUserId,
+    this.onReply,
+    this.typingAuthors = const [],
+  });
 
   @override
   Widget build(BuildContext context) {
-    return _MessageBubble(message: message, currentUserId: currentUserId, onReply: onReply);
+    return _MessageBubble(
+      message: message,
+      currentUserId: currentUserId,
+      onReply: onReply,
+      typingAuthors: typingAuthors,
+    );
   }
 }
 
@@ -37,8 +51,14 @@ class _MessageBubble extends StatefulWidget {
   final Message message;
   final String currentUserId;
   final VoidCallback? onReply;
+  final List<String> typingAuthors;
 
-  const _MessageBubble({required this.message, required this.currentUserId, this.onReply});
+  const _MessageBubble({
+    required this.message,
+    required this.currentUserId,
+    this.onReply,
+    this.typingAuthors = const [],
+  });
 
   @override
   State<_MessageBubble> createState() => _MessageBubbleState();
@@ -46,7 +66,9 @@ class _MessageBubble extends StatefulWidget {
 
 class _MessageBubbleState extends State<_MessageBubble> {
   final LayerLink _layerLink = LayerLink();
-  final OverlayPortalController _menuOverlay = OverlayPortalController();
+  // One portal for both typing chrome and the hover action menu — same
+  // right-anchored slot over the card's bottom edge; content swaps on hover.
+  final OverlayPortalController _chromeOverlay = OverlayPortalController();
 
   bool _hoveringCard = false;
   bool _hoveringMenu = false;
@@ -60,6 +82,10 @@ class _MessageBubbleState extends State<_MessageBubble> {
   // whatever the MouseRegions think is happening underneath it.
   bool _moreMenuOpen = false;
 
+  // Keeps the action menu in the shared chrome slot while the cursor
+  // crosses the gap between card and toolbar (see [_scheduleHide]).
+  bool _menuLatched = false;
+
   // The card's own hit box and the menu's hit box don't perfectly abut —
   // the menu is narrower than the card and offset from its edge — so a
   // cursor moving between them can pass through a sliver of neither for a
@@ -69,12 +95,26 @@ class _MessageBubbleState extends State<_MessageBubble> {
   // to claim the cursor before the menu actually disappears.
   Timer? _hideTimer;
 
+  bool get _hoverHighlight =>
+      _hoveringCard || _hoveringMenu || _moreMenuOpen;
+
+  bool get _showActionMenu => _hoverHighlight || _menuLatched;
+
+  bool get _showTypingChrome =>
+      widget.typingAuthors.isNotEmpty && !_showActionMenu;
+
+  bool get _showChrome => _showActionMenu || _showTypingChrome;
+
   void _cancelHide() => _hideTimer?.cancel();
 
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(milliseconds: 120), () {
-      if (!_hoveringCard && !_hoveringMenu && !_moreMenuOpen) _menuOverlay.hide();
+      if (!_hoveringCard && !_hoveringMenu && !_moreMenuOpen) {
+        _menuLatched = false;
+        _syncChromeOverlay();
+        if (mounted) setState(() {});
+      }
     });
   }
 
@@ -82,17 +122,19 @@ class _MessageBubbleState extends State<_MessageBubble> {
     _moreMenuOpen = open;
     if (open) {
       _cancelHide();
-      if (!_menuOverlay.isShowing) _menuOverlay.show();
+      _menuLatched = true;
     } else {
       _scheduleHide();
     }
+    _syncChromeOverlay();
     setState(() {});
   }
 
   void _enterCard() {
     _hoveringCard = true;
     _cancelHide();
-    if (!_menuOverlay.isShowing) _menuOverlay.show();
+    _menuLatched = true;
+    _syncChromeOverlay();
     setState(() {});
   }
 
@@ -105,6 +147,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
   void _enterMenu() {
     _hoveringMenu = true;
     _cancelHide();
+    _menuLatched = true;
     setState(() {});
   }
 
@@ -114,49 +157,97 @@ class _MessageBubbleState extends State<_MessageBubble> {
     setState(() {});
   }
 
+  void _syncChromeOverlay() {
+    if (_showChrome) {
+      if (!_chromeOverlay.isShowing) _chromeOverlay.show();
+    } else {
+      if (_chromeOverlay.isShowing) _chromeOverlay.hide();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.typingAuthors != widget.typingAuthors) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncChromeOverlay();
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.typingAuthors.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncChromeOverlay();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _hideTimer?.cancel();
     super.dispose();
   }
 
+  String _typingLabel(List<String> authors) {
+    if (authors.isEmpty) return '';
+    if (authors.length == 1) return '@${authors.first} is typing';
+    if (authors.length == 2) {
+      return '@${authors[0]}, @${authors[1]} are typing';
+    }
+    return '@${authors.first} +${authors.length - 1} are typing';
+  }
+
+  /// Shared right-anchored overlay slot: right edge fixed to the card,
+  /// width grows leftward with content (typing copy or action buttons).
+  Widget _chromeFollower({required Widget child}) {
+    // Overlay lays out non-Positioned children with tight full-viewport
+    // constraints (same mechanism as StackFit.expand). CompositedTransformFollower
+    // doesn't loosen those for its child, so without this Positioned wrapper
+    // the chrome is forced to fill the screen. left/top are irrelevant to
+    // where it actually paints — the follower positions itself via a layer
+    // transform tied to the anchors below, ignoring normal layout offset.
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: CompositedTransformFollower(
+        link: _layerLink,
+        targetAnchor: Alignment.bottomRight,
+        followerAnchor: Alignment.topRight,
+        offset: const Offset(-8, -20),
+        child: child,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final message = widget.message;
-    final hovering = _hoveringCard || _hoveringMenu || _moreMenuOpen;
+    final hovering = _hoverHighlight;
+    final typingAuthors = widget.typingAuthors;
 
     return CompositedTransformTarget(
       link: _layerLink,
       child: OverlayPortal(
-        controller: _menuOverlay,
+        controller: _chromeOverlay,
         // Rendered on the root Overlay rather than in this widget's own
         // Stack: the message list gives each row an exact, non-overlapping
-        // slice of the screen, so a menu that merely overflows its own
+        // slice of the screen, so chrome that merely overflows its own
         // Stack still lands in a *different* list row's hit-test territory
         // and can't be hovered there. Rendering on the Overlay sidesteps
         // list-row boundaries entirely, and keeps rows tightly packed since
         // nothing needs reserved space for the overflow.
         overlayChildBuilder: (context) {
-          // Overlay lays out non-Positioned children with tight
-          // full-viewport constraints (same mechanism as StackFit.expand).
-          // CompositedTransformFollower doesn't loosen those for its child,
-          // so without this Positioned wrapper the menu is forced to fill
-          // the screen. left/top are irrelevant to where it actually
-          // paints — the follower positions itself via a layer transform
-          // tied to the anchors below, ignoring normal layout offset.
-          return Positioned(
-            left: 0,
-            top: 0,
-            child: CompositedTransformFollower(
-              link: _layerLink,
-              targetAnchor: Alignment.bottomRight,
-              followerAnchor: Alignment.topRight,
-              offset: const Offset(-8, -20),
+          if (_showActionMenu) {
+            return _chromeFollower(
               child: TweenAnimationBuilder<double>(
                 tween: Tween(begin: 0, end: 1),
                 duration: const Duration(milliseconds: 100),
-                builder: (context, opacity, child) => Opacity(opacity: opacity, child: child),
+                builder: (context, opacity, child) =>
+                    Opacity(opacity: opacity, child: child),
                 child: MouseRegion(
                   onEnter: (_) => _enterMenu(),
                   onExit: (_) => _exitMenu(),
@@ -167,6 +258,17 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     onMoreMenuOpenChanged: _setMoreMenuOpen,
                   ),
                 ),
+              ),
+            );
+          }
+          // Cue clear/retarget can rebuild this child with [] before the
+          // post-frame hide runs — render nothing instead of calling .first.
+          if (typingAuthors.isEmpty) return const SizedBox.shrink();
+          return _chromeFollower(
+            child: IgnorePointer(
+              child: _TypingCueChrome(
+                label: _typingLabel(typingAuthors),
+                color: colorScheme.onSurfaceVariant,
               ),
             ),
           );
@@ -179,18 +281,27 @@ class _MessageBubbleState extends State<_MessageBubble> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: BoxDecoration(
-              color: hovering ? colorScheme.onSurface.withValues(alpha: 0.05) : Colors.transparent,
+              color: hovering
+                  ? colorScheme.onSurface.withValues(alpha: 0.05)
+                  : Colors.transparent,
               borderRadius: BorderRadius.circular(8),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (message.role == MessageRole.functionCall || message.role == MessageRole.functionResult)
+                if (message.role == MessageRole.functionCall ||
+                    message.role == MessageRole.functionResult ||
+                    message.role == MessageRole.thinking)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Text(
-                      message.role == MessageRole.functionCall ? 'FUNCTION CALL' : 'FUNCTION RESULT',
+                      switch (message.role) {
+                        MessageRole.functionCall => 'FUNCTION CALL',
+                        MessageRole.functionResult => 'FUNCTION RESULT',
+                        MessageRole.thinking => 'THINKING',
+                        _ => '',
+                      },
                       style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.bold,
@@ -203,6 +314,15 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   child: MarkdownBody(
                     data: message.content.isEmpty ? '…' : message.content,
                     selectable: false,
+                    fitContent: false,
+                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                        .copyWith(
+                      codeblockDecoration: BoxDecoration(
+                        color: Theme.of(context).cardTheme.color ??
+                            Theme.of(context).cardColor,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -256,6 +376,103 @@ class _HoverLabel extends StatelessWidget {
   }
 }
 
+/// Typing indicator chip with a soft opacity breathe so the cue reads as live
+/// without competing with message content.
+class _TypingCueChrome extends StatefulWidget {
+  const _TypingCueChrome({
+    required this.label,
+    required this.color,
+  });
+
+  final String label;
+  final Color color;
+
+  @override
+  State<_TypingCueChrome> createState() => _TypingCueChromeState();
+}
+
+class _TypingCueChromeState extends State<_TypingCueChrome>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _opacity = Tween<double>(begin: 0.55, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: _MessageChromeShell(
+        bordered: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+              color: widget.color,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Surface chip shared by the hover action menu and typing indicator.
+///
+/// Right-anchored by the overlay follower: intrinsic width grows leftward
+/// as content widens. [bordered] is true for the interactive menu, false
+/// for typing chrome (same fill, no outline).
+class _MessageChromeShell extends StatelessWidget {
+  const _MessageChromeShell({
+    required this.bordered,
+    required this.child,
+  });
+
+  final bool bordered;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: bordered ? 2 : 1,
+      borderRadius: BorderRadius.circular(6),
+      color: colorScheme.surface,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          border: bordered
+              ? Border.all(color: colorScheme.outlineVariant)
+              : null,
+        ),
+        padding: bordered
+            ? const EdgeInsets.symmetric(horizontal: 2, vertical: 2)
+            : EdgeInsets.zero,
+        child: child,
+      ),
+    );
+  }
+}
+
 /// Hover toolbar for a message, floating over the bottom border of the card
 /// and right-aligned.
 class _MessageActionMenu extends StatelessWidget {
@@ -273,24 +490,15 @@ class _MessageActionMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      elevation: 2,
-      borderRadius: BorderRadius.circular(6),
-      color: Theme.of(context).colorScheme.surface,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _MessageActionButton(icon: Icons.reply, tooltip: 'Reply', onPressed: onReply),
-            _CopyButton(content: content),
-            _MoreActionButton(messageId: messageId, onOpenChanged: onMoreMenuOpenChanged),
-          ],
-        ),
+    return _MessageChromeShell(
+      bordered: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MessageActionButton(icon: Icons.reply, tooltip: 'Reply', onPressed: onReply),
+          _CopyButton(content: content),
+          _MoreActionButton(messageId: messageId, onOpenChanged: onMoreMenuOpenChanged),
+        ],
       ),
     );
   }

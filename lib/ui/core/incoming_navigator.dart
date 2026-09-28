@@ -9,17 +9,21 @@ import 'theme/app_colors.dart';
 /// direction. Data-model-wise this is the mirror image of
 /// [OutgoingNavigator]: same "pick one candidate from a pool" operation,
 /// opposite edge direction. Also serves as origin transparency: the pill
-/// flags when a message's upward context came via a stitch rather than a
-/// reply, even when there's nothing to cycle through.
+/// flags when a message's upward context came via a stitch or a hidden
+/// reply rather than a normal reply, even when there's nothing to cycle
+/// through.
 ///
 /// Per the exclusivity rule (column-ui-impl-plan.md §4-5): only renders when
 /// a reply-anchored parent is already displayed above the message and the
 /// combined pool has more than one candidate, OR the currently active
-/// parent is itself a stitch (non-interactive "Linked origin" flag, single
-/// candidate).
+/// parent is itself a stitch / hidden reply (non-interactive origin flag).
+///
+/// Pool order matches [IncomingEdges.all]: hidden replies, then non-hidden
+/// replies, then stitches.
 class IncomingNavigator extends StatelessWidget {
   const IncomingNavigator({
     super.key,
+    required this.hiddenCount,
     required this.replyCount,
     required this.stitchCount,
     required this.currentIndex,
@@ -28,29 +32,38 @@ class IncomingNavigator extends StatelessWidget {
     this.onNext,
   });
 
-  /// Number of reply candidates in the pool (0 or 1, ordered first).
+  /// Hidden-reply parents in the pool (ordered first).
+  final int hiddenCount;
+
+  /// Non-hidden reply parents (0 or 1 today, after hidden).
   final int replyCount;
 
-  /// Number of stitch candidates in the pool (ordered after reply).
+  /// Stitch parents (ordered after replies).
   final int stitchCount;
 
-  /// Position of the currently-active parent within the combined pool
-  /// (reply first, then stitch), or -1 if unknown/none.
+  /// Position of the currently-active parent within the combined pool, or
+  /// -1 if unknown/none.
   final int currentIndex;
 
   final bool loading;
   final VoidCallback? onPrev;
   final VoidCallback? onNext;
 
-  int get _total => replyCount + stitchCount;
+  int get _total => hiddenCount + replyCount + stitchCount;
 
   bool get _hasActive => currentIndex >= 0;
 
-  bool get _isCurrentStitch => _hasActive && currentIndex >= replyCount;
+  bool get _isCurrentHidden =>
+      _hasActive && currentIndex < hiddenCount;
+
+  bool get _isCurrentStitch =>
+      _hasActive && currentIndex >= hiddenCount + replyCount;
 
   bool get _isSwitchable => _total > 1;
 
-  bool get _shouldShow => _isSwitchable || (_hasActive && _isCurrentStitch);
+  bool get _shouldShow =>
+      _isSwitchable ||
+      (_hasActive && (_isCurrentStitch || _isCurrentHidden));
 
   @override
   Widget build(BuildContext context) {
@@ -59,11 +72,21 @@ class IncomingNavigator extends StatelessWidget {
     final canPrev = _isSwitchable && currentIndex > 0;
     final canNext = _isSwitchable && currentIndex < _total - 1;
 
-    String label;
-    if (_isCurrentStitch) {
-      final indexInStitchGroup = currentIndex - replyCount + 1;
-      label = stitchCount > 1 ? 'Linked origin ($indexInStitchGroup/$stitchCount)' : 'Linked origin';
+    final String label;
+    final _OriginKind kind;
+    if (_isCurrentHidden) {
+      kind = _OriginKind.hidden;
+      label = hiddenCount > 1
+          ? 'Hidden thread (${currentIndex + 1}/$hiddenCount)'
+          : 'Hidden thread';
+    } else if (_isCurrentStitch) {
+      kind = _OriginKind.stitch;
+      final indexInStitchGroup = currentIndex - hiddenCount - replyCount + 1;
+      label = stitchCount > 1
+          ? 'Linked origin ($indexInStitchGroup/$stitchCount)'
+          : 'Linked origin';
     } else {
+      kind = _OriginKind.reply;
       label = 'Reply origin';
     }
 
@@ -80,7 +103,7 @@ class IncomingNavigator extends StatelessWidget {
             onPressed: onPrev,
           ),
           const SizedBox(width: 3),
-          _OriginPill(label: label, isStitch: _isCurrentStitch, loading: loading),
+          _OriginPill(label: label, kind: kind, loading: loading),
           const SizedBox(width: 3),
           _SwitcherArrow(
             icon: Icons.chevron_right,
@@ -93,25 +116,52 @@ class IncomingNavigator extends StatelessWidget {
   }
 }
 
+enum _OriginKind { reply, hidden, stitch }
+
 class _OriginPill extends StatelessWidget {
-  const _OriginPill({required this.label, required this.isStitch, required this.loading});
+  const _OriginPill({
+    required this.label,
+    required this.kind,
+    required this.loading,
+  });
 
   final String label;
-  final bool isStitch;
+  final _OriginKind kind;
   final bool loading;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final appColors = context.appColors;
+
+    final Color borderColor;
+    final IconData? icon;
+    final Color? iconColor;
+    final bool italic;
+    switch (kind) {
+      case _OriginKind.stitch:
+        borderColor = appColors.stitchGreenBorderIdle;
+        icon = Icons.link;
+        iconColor = appColors.stitchGreen;
+        italic = true;
+      case _OriginKind.hidden:
+        borderColor = colorScheme.onSurface.withValues(alpha: 0.28);
+        icon = Icons.visibility_outlined;
+        iconColor = colorScheme.onSurface.withValues(alpha: 0.65);
+        italic = true;
+      case _OriginKind.reply:
+        borderColor = colorScheme.outlineVariant;
+        icon = null;
+        iconColor = null;
+        italic = false;
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: isStitch ? appColors.stitchGreenBorderIdle : colorScheme.outlineVariant,
-        ),
+        border: Border.all(color: borderColor),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -119,18 +169,22 @@ class _OriginPill extends StatelessWidget {
           if (loading)
             const Padding(
               padding: EdgeInsets.only(right: 3),
-              child: SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
+              child: SizedBox(
+                width: 10,
+                height: 10,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
             )
-          else if (isStitch)
+          else if (icon != null)
             Padding(
               padding: const EdgeInsets.only(right: 3),
-              child: Icon(Icons.link, size: 10, color: appColors.stitchGreen),
+              child: Icon(icon, size: 10, color: iconColor),
             ),
           Text(
             label,
             style: TextStyle(
               fontSize: 11,
-              fontStyle: isStitch ? FontStyle.italic : FontStyle.normal,
+              fontStyle: italic ? FontStyle.italic : FontStyle.normal,
               color: colorScheme.onSurface.withValues(alpha: 0.9),
             ),
           ),
