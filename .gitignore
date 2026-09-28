@@ -54,3 +54,6 @@ python-server/__pycache__/
 
 # Runtime logs (STITCH_LOG_DIR; default <repo>/logs)
 /logs/
+
+# flutter_distributor build output
+/dist/
