@@ -164,6 +164,7 @@ class _ColumnViewState extends State<ColumnView> {
 
   void _send(ColumnsViewModel vm) {
     final content = _controller.text;
+    vm.retainAuthPromptsAcrossSend(widget.state.id);
     _controller.clear();
     _focusNode.requestFocus();
     vm.sendMessage(widget.state.id, content);
@@ -226,6 +227,8 @@ class _ColumnViewState extends State<ColumnView> {
                         onCancelReply: () => vm.setReplyTarget(state.id, null),
                         cwdWarningBotIds: state.cwdWarningBotIds,
                         cwdWarningPhase: state.cwdWarningPhase,
+                        authPrompts: state.authPrompts,
+                        onSignIn: vm.beginBotAuth,
                       ),
                     ),
                 ],
@@ -1064,6 +1067,8 @@ class _Composer extends StatelessWidget {
     this.onCancelReply,
     this.cwdWarningBotIds = const [],
     this.cwdWarningPhase = CwdWarningPhase.none,
+    this.authPrompts = const [],
+    this.onSignIn,
   });
 
   final TextEditingController controller;
@@ -1077,6 +1082,8 @@ class _Composer extends StatelessWidget {
   final VoidCallback? onCancelReply;
   final List<String> cwdWarningBotIds;
   final CwdWarningPhase cwdWarningPhase;
+  final List<BotAuthPrompt> authPrompts;
+  final void Function(String botId)? onSignIn;
 
   @override
   Widget build(BuildContext context) {
@@ -1094,6 +1101,10 @@ class _Composer extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _AuthPromptBanner(
+            prompts: authPrompts,
+            onSignIn: onSignIn,
+          ),
           _CwdWarningBanner(
             botIds: cwdWarningBotIds,
             phase: cwdWarningPhase,
@@ -1211,6 +1222,81 @@ class _Composer extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Sign-in prompt for bots that advertise `requires_auth`. Stays until the
+/// bridge reports `authenticated`.
+class _AuthPromptBanner extends StatelessWidget {
+  const _AuthPromptBanner({
+    required this.prompts,
+    this.onSignIn,
+  });
+
+  final List<BotAuthPrompt> prompts;
+  final void Function(String botId)? onSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    if (prompts.isEmpty) return const SizedBox.shrink();
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final prompt in prompts)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.lock_outline,
+                    size: 16,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(child: _AuthPromptBody(prompt: prompt)),
+                  if (prompt.state == 'unauthenticated')
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: TextButton(
+                        style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                        onPressed: onSignIn == null ? null : () => onSignIn!(prompt.botId),
+                        child: const Text('Sign in'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuthPromptBody extends StatelessWidget {
+  const _AuthPromptBody({required this.prompt});
+
+  final BotAuthPrompt prompt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final style = TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant);
+    final tag = '@${prompt.botId}';
+    switch (prompt.state) {
+      case 'pending':
+        return Text('Signing in to $tag…', style: style);
+      case 'unavailable':
+        return Text(
+          prompt.detail ?? 'This bot is not available in this build.',
+          style: style,
+        );
+      default:
+        return Text('Sign in to $tag to get a reply.', style: style);
+    }
   }
 }
 

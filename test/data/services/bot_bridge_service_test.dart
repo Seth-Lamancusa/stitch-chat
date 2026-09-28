@@ -128,5 +128,18 @@ void main() {
       expect(events[0].targetMessageId, 'trig-9');
       expect(events[1].typing, isFalse);
     });
+
+    test('auth_state updates the notifier without a pending invoke', () {
+      bridge.debugEmitEnvelope({
+        'type': 'auth_state',
+        'bot_id': 'cursor',
+        'state': 'pending',
+        'url': 'https://cursor.com/login',
+      });
+      final snap = bridge.authStates.value['cursor'];
+      expect(snap?.state, 'pending');
+      expect(snap?.url, 'https://cursor.com/login');
+      expect(snap?.needsPrompt, isTrue);
+    });
   });
 }

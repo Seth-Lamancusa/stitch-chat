@@ -14,6 +14,13 @@ passed at invoke time — not message state. Bots that advertise
 `requires_cwd` must receive it; the bridge responds with
 `invoke_skipped` (not `error`) and does not run the adapter.
 
+Bots that advertise `requires_auth` are skipped the same way
+(`reason: requires_auth`) until their auth handler reports
+`authenticated`. The client sends `auth_begin`; that bot's handler
+decides what signing in runs. The bridge pushes `auth_state`
+(`authenticated` | `unauthenticated` | `pending` | `unavailable`,
+optional `detail`).
+
 Multi-part bot turns (Cursor side-channel) may emit several
 `message_start`/`message_end` pairs per invoke. Optional fields:
   - `role`: thinking | functionCall | functionResult | localBot
@@ -35,6 +42,8 @@ MESSAGE_END = "message_end"
 INVOKE_SKIPPED = "invoke_skipped"
 ERROR = "error"
 CUE = "cue"
+AUTH_BEGIN = "auth_begin"
+AUTH_STATE = "auth_state"
 
 DEFAULT_MODEL = "gpt-4o-mini"
 
@@ -67,11 +76,16 @@ class BotSpec:
     `requires_cwd` is enforced on the bridge before adapter dispatch via
     `invoke_skipped` (not `error`). Clients may also read it from `ready`
     to surface composer warnings.
+
+    `requires_auth` skips dispatch until that bot's auth handler reports
+    `authenticated`. The client only sends `auth_begin`; the handler
+    decides the command and how the user signs in.
     """
 
     id: str
     aliases: frozenset[str]
     requires_cwd: bool = False
+    requires_auth: bool = False
 
 
 # Single source of truth for local bots. Add an entry here to register a new
@@ -80,7 +94,7 @@ class BotSpec:
 # bot id or alias by name. Adapter implementations live in `adapters.ADAPTERS`.
 BOT_REGISTRY: tuple[BotSpec, ...] = (
     BotSpec(id="chatgpt", aliases=frozenset({"chatgpt", "openai"})),
-    BotSpec(id="cursor", aliases=frozenset({"cursor"})),
+    BotSpec(id="cursor", aliases=frozenset({"cursor"}), requires_auth=True),
 )
 
 DEFAULT_BOT_ID = BOT_REGISTRY[0].id
@@ -101,6 +115,34 @@ def bot_requires_cwd(bot_id: str) -> bool:
     return bot_id in BOTS_REQUIRING_CWD
 
 
+# Canonical bot ids that must be authenticated before adapter dispatch.
+BOTS_REQUIRING_AUTH = frozenset(spec.id for spec in BOT_REGISTRY if spec.requires_auth)
+
+
+def bot_requires_auth(bot_id: str) -> bool:
+    return bot_id in BOTS_REQUIRING_AUTH
+
+
+def auth_state_envelope(
+    *,
+    bot_id: str,
+    state: str,
+    url: str | None = None,
+    detail: str | None = None,
+) -> dict:
+    """Ephemeral auth snapshot — not a graph node, never persisted."""
+    envelope: dict = {
+        "type": AUTH_STATE,
+        "bot_id": bot_id,
+        "state": state,
+    }
+    if url:
+        envelope["url"] = url
+    if detail:
+        envelope["detail"] = detail
+    return envelope
+
+
 def bot_registry_payload() -> list[dict]:
     """JSON-serializable registry sent to Dart on connect (see `ready`
     envelope) so it can derive its own @tag matching and capability flags."""
@@ -109,6 +151,7 @@ def bot_registry_payload() -> list[dict]:
             "id": spec.id,
             "aliases": sorted(spec.aliases),
             "requires_cwd": spec.requires_cwd,
+            "requires_auth": spec.requires_auth,
         }
         for spec in BOT_REGISTRY
     ]

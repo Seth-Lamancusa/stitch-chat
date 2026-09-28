@@ -57,3 +57,6 @@ python-server/__pycache__/
 
 # flutter_distributor build output
 /dist/
+
+# Pinned Cursor CLI (tool/fetch_cursor_agent.sh). Not committed.
+/third_party/cursor-agent/

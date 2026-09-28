@@ -8,7 +8,24 @@ import '../../domain/bot_registry.dart';
 import 'stitch_ws_client.dart';
 import 'typing_cue_store.dart';
 
-/// One bot message part from the Python bridge (side-channel or reply branch).
+/// Ephemeral sign-in snapshot for one bot. Not a message.
+class BotAuthSnapshot {
+  const BotAuthSnapshot({
+    required this.botId,
+    required this.state,
+    this.url,
+    this.detail,
+  });
+
+  final String botId;
+
+  /// `authenticated` | `unauthenticated` | `pending` | `unavailable`.
+  final String state;
+  final String? url;
+  final String? detail;
+
+  bool get needsPrompt => state != 'authenticated';
+}
 class BotBridgePart {
   const BotBridgePart({
     required this.messageId,
@@ -95,6 +112,7 @@ class BotBridgeService {
   StreamSubscription<Map<String, dynamic>>? _subscription;
   final _pending = <String, _PendingInvocation>{};
   final _cueController = StreamController<TypingCueEvent>.broadcast();
+  final authStates = ValueNotifier<Map<String, BotAuthSnapshot>>(const {});
   bool _connected = false;
   BotRegistry _registry = const BotRegistry.empty();
 
@@ -144,7 +162,7 @@ class BotBridgeService {
       'dart.bridge',
       '→py invoke bot=$botId trigger=$triggerMessageId cwd=${cwd ?? "-"} context=${context.length}',
     );
-    _client.send({
+    _send({
       'type': 'user_message',
       'message_id': triggerMessageId,
       'bot_id': botId,
@@ -191,6 +209,10 @@ class BotBridgeService {
     }
     if (type == 'cue') {
       _onCue(envelope);
+      return;
+    }
+    if (type == 'auth_state') {
+      _onAuthState(envelope);
       return;
     }
 
@@ -291,6 +313,57 @@ class BotBridgeService {
         ),
       );
     }
+  }
+
+  void _onAuthState(Map<String, dynamic> envelope) {
+    final botId = envelope['bot_id'] as String?;
+    final state = envelope['state'] as String?;
+    if (botId == null || state == null) {
+      StitchLog.hop('dart.bridge', '←py auth_state ignored malformed');
+      return;
+    }
+    final next = Map<String, BotAuthSnapshot>.from(authStates.value);
+    next[botId] = BotAuthSnapshot(
+      botId: botId,
+      state: state,
+      url: envelope['url'] as String?,
+      detail: envelope['detail'] as String?,
+    );
+    authStates.value = next;
+    StitchLog.hop('dart.bridge', '←py auth_state bot=$botId state=$state');
+  }
+
+  /// Asks the bridge to run [botId]'s auth handler. State arrives on
+  /// [authStates]; this method does not wait for the handler to finish.
+  void beginAuth(String botId) {
+    if (!_connected) {
+      throw StateError('BotBridgeService.connect() must complete before beginAuth');
+    }
+    StitchLog.hop('dart.bridge', '→py auth_begin bot=$botId');
+    _send({'type': 'auth_begin', 'bot_id': botId});
+  }
+
+  void _send(Map<String, dynamic> envelope) {
+    debugSent.add(envelope);
+    debugOnSend?.call(envelope);
+    _client.send(envelope);
+  }
+
+  /// Test hook invoked synchronously from [_send], before the socket write.
+  @visibleForTesting
+  void Function(Map<String, dynamic> envelope)? debugOnSend;
+
+  /// Envelopes this service handed to the socket. Tests read this instead
+  /// of a live WebSocket.
+  @visibleForTesting
+  final List<Map<String, dynamic>> debugSent = [];
+
+  /// Test harness: mark the socket up and optionally install a registry
+  /// without connecting.
+  @visibleForTesting
+  void debugConnect({BotRegistry? registry}) {
+    _connected = true;
+    if (registry != null) _registry = registry;
   }
 
   /// Test harness: feed a cue envelope without a pending invoke.

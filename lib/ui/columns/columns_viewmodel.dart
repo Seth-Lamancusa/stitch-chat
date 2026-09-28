@@ -58,6 +58,7 @@ class ColumnsViewModel extends ChangeNotifier {
     final bridge = _botBridge;
     if (bridge != null) {
       _cueSubscription = bridge.cues.listen(this.typingCues.apply);
+      bridge.authStates.addListener(_onBridgeAuth);
     }
     this.typingCues.addListener(notifyListeners);
   }
@@ -83,6 +84,13 @@ class ColumnsViewModel extends ChangeNotifier {
   final Map<String, String?> _anchors = {};
   final Map<String, String> _composerDrafts = {};
   final Map<String, Timer> _cwdWarningFadeTimers = {};
+  final List<_HeldBotInvoke> _heldInvokes = [];
+
+  /// Bots kept on the sign-in banner from the moment of send until the
+  /// invoke is recorded. The composer clears first; without this the banner
+  /// drops for the gap before a held invoke exists.
+  final Map<String, Set<String>> _authPromptPins = {};
+  bool _replayingHeld = false;
 
   List<ColumnUiState> get columns => List.unmodifiable(_states);
 
@@ -150,6 +158,7 @@ class ColumnsViewModel extends ChangeNotifier {
     if (_states.isNotEmpty) _states.first.isActive = true;
     for (final state in _states) {
       await _refresh(state.id, isFreshAnchor: true);
+      await refreshAuthPrompt(state.id);
     }
     notifyListeners();
   }
@@ -178,6 +187,7 @@ class ColumnsViewModel extends ChangeNotifier {
     );
     notifyListeners();
     await _refresh(meta.id, isFreshAnchor: true);
+    await refreshAuthPrompt(meta.id);
     notifyListeners();
   }
 
@@ -230,11 +240,28 @@ class ColumnsViewModel extends ChangeNotifier {
     await refreshCwdWarning(id);
   }
 
+  /// Keeps the current sign-in banner up across the composer clear that
+  /// happens before [sendMessage] records a held invoke.
+  void retainAuthPromptsAcrossSend(String columnId) {
+    if (!_states.any((s) => s.id == columnId)) return;
+    final bots = {
+      for (final prompt in _stateFor(columnId).authPrompts) prompt.botId,
+    };
+    if (bots.isEmpty) {
+      _authPromptPins.remove(columnId);
+      return;
+    }
+    _authPromptPins[columnId] = bots;
+  }
+
   /// Called as the composer draft changes so the cwd advisory can track
   /// prospective local-bot recipients (mentions + inherited).
   Future<void> onComposerDraftChanged(String columnId, String draft) {
     _composerDrafts[columnId] = draft;
-    return refreshCwdWarning(columnId);
+    return Future.wait([
+      refreshCwdWarning(columnId),
+      refreshAuthPrompt(columnId),
+    ]);
   }
 
   /// Recomputes the advisory banner above the reply box. No-ops while a
@@ -559,6 +586,16 @@ class ColumnsViewModel extends ChangeNotifier {
   /// branch through the reply target is sent to [_botBridge] and the reply
   /// is persisted under the trigger.
   Future<void> sendMessage(String columnId, String content) async {
+    try {
+      await _sendMessage(columnId, content);
+    } finally {
+      if (_authPromptPins.remove(columnId) != null) {
+        await refreshAuthPrompt(columnId);
+      }
+    }
+  }
+
+  Future<void> _sendMessage(String columnId, String content) async {
     if (content.trim().isEmpty) return;
     final state = _stateFor(columnId);
     final parentId =
@@ -681,43 +718,172 @@ class ColumnsViewModel extends ChangeNotifier {
     }
 
     for (final botId in botRecipientIds) {
-      StitchLog.hop(
-        'dart.column',
-        '→bridge bot=$botId trigger=${newMessage.id} cwd=${cwd ?? "-"} context=${contextNodes.length}',
+      await _invokeBot(
+        columnId: columnId,
+        botId: botId,
+        triggerId: newMessage.id,
+        context: contextNodes,
+        cwd: cwd,
       );
-      try {
-        final reply = await bridge.invoke(
-          botId: botId,
-          triggerMessageId: newMessage.id,
-          context: contextNodes,
-          cwd: cwd,
-          onPart: (part) async {
-            await _persistBotPart(columnId, part: part);
-            StitchLog.hop(
-              'dart.column',
-              'persisted bot part id=${part.messageId} parent=${part.parentMessageId} role=${part.role.name} final=${part.isFinal}',
-            );
-          },
-        );
-        if (reply.skipped) {
-          StitchLog.hop(
-            'dart.column',
-            'bridge skipped bot=$botId reason=${reply.skipReason}',
-          );
-        }
-      } catch (e, st) {
-        StitchLog.error(
-          'column=$columnId bot=$botId failed',
-          tag: 'dart.column',
-          error: e,
-          stackTrace: st,
-        );
-        _notifications?.showError('Bot $botId failed: $e');
-      }
     }
   }
 
+  Future<void> _invokeBot({
+    required String columnId,
+    required String botId,
+    required String triggerId,
+    required List<Map<String, dynamic>> context,
+    required String? cwd,
+  }) async {
+    final bridge = _botBridge;
+    if (bridge == null) return;
+    StitchLog.hop(
+      'dart.column',
+      '→bridge bot=$botId trigger=$triggerId cwd=${cwd ?? "-"} context=${context.length}',
+    );
+    try {
+      final reply = await bridge.invoke(
+        botId: botId,
+        triggerMessageId: triggerId,
+        context: context,
+        cwd: cwd,
+        onPart: (part) async {
+          await _persistBotPart(columnId, part: part);
+          StitchLog.hop(
+            'dart.column',
+            'persisted bot part id=${part.messageId} parent=${part.parentMessageId} role=${part.role.name} final=${part.isFinal}',
+          );
+        },
+      );
+      if (reply.skipped && reply.skipReason == 'requires_auth') {
+        _heldInvokes.removeWhere(
+          (held) => held.triggerId == triggerId && held.botId == botId,
+        );
+        _heldInvokes.add(
+          _HeldBotInvoke(
+            columnId: columnId,
+            triggerId: triggerId,
+            botId: botId,
+            context: context,
+            cwd: cwd,
+          ),
+        );
+        StitchLog.hop(
+          'dart.column',
+          'held invoke bot=$botId trigger=$triggerId reason=requires_auth',
+        );
+        await refreshAuthPrompt(columnId);
+        return;
+      }
+      if (reply.skipped) {
+        StitchLog.hop(
+          'dart.column',
+          'bridge skipped bot=$botId reason=${reply.skipReason}',
+        );
+      }
+    } catch (e, st) {
+      StitchLog.error(
+        'column=$columnId bot=$botId failed',
+        tag: 'dart.column',
+        error: e,
+        stackTrace: st,
+      );
+      _notifications?.showError('Bot $botId failed: $e');
+    }
+  }
+
+  /// Asks the bridge to run [botId]'s own sign-in. The handler decides the
+  /// command; for Cursor that is `agent login`, which opens the system browser.
+  void beginBotAuth(String botId) {
+    final bridge = _botBridge;
+    if (bridge == null) return;
+    try {
+      bridge.beginAuth(botId);
+    } catch (e) {
+      _notifications?.showError('Could not start sign-in: $e');
+    }
+  }
+
+  void _onBridgeAuth() {
+    unawaited(_replayHeldInvokes());
+    for (final state in _states) {
+      unawaited(refreshAuthPrompt(state.id));
+    }
+  }
+
+  Future<void> _replayHeldInvokes() async {
+    if (_replayingHeld) return;
+    final bridge = _botBridge;
+    if (bridge == null) return;
+    final ready = [
+      for (final held in List<_HeldBotInvoke>.of(_heldInvokes))
+        if (bridge.authStates.value[held.botId]?.state == 'authenticated') held,
+    ];
+    if (ready.isEmpty) return;
+    _replayingHeld = true;
+    try {
+      for (final held in ready) {
+        _heldInvokes.remove(held);
+      }
+      for (final held in ready) {
+        await _invokeBot(
+          columnId: held.columnId,
+          botId: held.botId,
+          triggerId: held.triggerId,
+          context: held.context,
+          cwd: held.cwd,
+        );
+      }
+      for (final columnId in ready.map((held) => held.columnId).toSet()) {
+        await refreshAuthPrompt(columnId);
+      }
+    } finally {
+      _replayingHeld = false;
+    }
+  }
+
+  /// Recomputes the sign-in banner for bots this column is addressing that
+  /// are not authenticated. Held invokes keep the banner up after the draft
+  /// is cleared.
+  Future<void> refreshAuthPrompt(String columnId) async {
+    if (!_states.any((s) => s.id == columnId)) return;
+    final state = _stateFor(columnId);
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    final draft = _composerDrafts[columnId] ?? '';
+    final addressed = await _addressedBotIds(columnId, draft);
+    for (final held in _heldInvokes) {
+      if (held.columnId == columnId) addressed.add(held.botId);
+    }
+    for (final botId in _authPromptPins[columnId] ?? const <String>{}) {
+      addressed.add(botId);
+    }
+    final snapshots = _botBridge?.authStates.value ?? const {};
+    final prompts = <BotAuthPrompt>[
+      for (final botId in addressed)
+        if (registry.requiresAuth(botId))
+          if (snapshots[botId] case final snap?)
+            if (snap.needsPrompt)
+              BotAuthPrompt(
+                botId: botId,
+                state: snap.state,
+                detail: snap.detail,
+              ),
+    ];
+    state.authPrompts = List.unmodifiable(prompts);
+    notifyListeners();
+  }
+
   Future<List<String>> _botsNeedingCwd(String columnId, String draft) async {
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    final botIds = await _addressedBotIds(columnId, draft);
+    return [
+      for (final botId in botIds)
+        if (registry.requiresCwd(botId)) botId,
+    ];
+  }
+
+  /// Mentions in [draft] plus local bots inherited from the reply parent.
+  Future<Set<String>> _addressedBotIds(String columnId, String draft) async {
     final registry = _botBridge?.registry ?? const BotRegistry.empty();
     final state = _stateFor(columnId);
     final parentId =
@@ -750,10 +916,7 @@ class ColumnsViewModel extends ChangeNotifier {
       }
     }
 
-    return [
-      for (final botId in botIds)
-        if (registry.requiresCwd(botId)) botId,
-    ];
+    return botIds;
   }
 
   void _clearCwdWarning(ColumnUiState state) {
@@ -782,16 +945,17 @@ class ColumnsViewModel extends ChangeNotifier {
     }
     _cwdWarningFadeTimers.clear();
     _cueSubscription?.cancel();
+    _botBridge?.authStates.removeListener(_onBridgeAuth);
     typingCues.removeListener(notifyListeners);
     typingCues.dispose();
     super.dispose();
   }
 
   /// Persists a bot part into the message graph and refreshes the column.
-  /// Does not write branch pointers or move the scroll-center anchor — an
-  /// unset tip still picks up a new reply child via
-  /// [BranchPathService]'s most-recent-reply default on walk; an already-
-  /// chosen fork is left alone for sibling navigation (and may toast).
+  /// A non-hidden reply that is the default child of the current tip is
+  /// materialized via [defaultPage] so the column shows it without a scroll.
+  /// An already-chosen fork is left alone (and may toast). The scroll-center
+  /// anchor is not moved.
   Future<void> _persistBotPart(
     String columnId, {
     required BotBridgePart part,
@@ -815,6 +979,11 @@ class ColumnsViewModel extends ChangeNotifier {
   /// Toasts when an eligible reply (`user` / `localBot`) attaches under the
   /// column's reply tree but would not appear on the current visible branch
   /// — thinking/tool roles stay silent.
+  ///
+  /// A non-hidden reply that is the default child of this column's current
+  /// tip is materialized here, before that check, via [defaultPage]. Hidden
+  /// side-fork roots are not candidates, and an existing outgoing pointer is
+  /// left alone.
   Future<void> ingestIncomingMessage({
     required String columnId,
     required Message message,
@@ -824,6 +993,12 @@ class ColumnsViewModel extends ChangeNotifier {
   }) async {
     await _messages.saveMessage(message);
     await _messages.addReplyEdge(parentId, message.id, hidden: hidden);
+    await _materializeIncomingTip(
+      columnId,
+      parentId: parentId,
+      messageId: message.id,
+      hidden: hidden,
+    );
 
     if (notifyIfOffPath && _isToastEligibleRole(message.role)) {
       final anchorId = _anchors[columnId];
@@ -859,6 +1034,36 @@ class ColumnsViewModel extends ChangeNotifier {
 
     await _refresh(columnId);
     notifyListeners();
+  }
+
+  /// Writes the visible outgoing pointer when [messageId] is the default
+  /// non-hidden reply under this column's materialized tip.
+  ///
+  /// [defaultPage] is the same hop [extendBelow] takes on scroll: it follows
+  /// an existing pointer, selects [BranchPathService.resolveDefaultCandidate]
+  /// only in unset territory, and continues along already-saved default
+  /// children up to [kDefaultBatch]. A hidden part never enters that
+  /// candidate pool, so a side fork stays behind "Reveal hidden thread"
+  /// until a normal reply occupies the slot.
+  Future<void> _materializeIncomingTip(
+    String columnId, {
+    required String parentId,
+    required String messageId,
+    required bool hidden,
+  }) async {
+    if (hidden) return;
+    final state = _stateFor(columnId);
+    if (state.rows.isEmpty) return;
+    if (state.rows.last.message.id != parentId) return;
+    if (await _columns.getVisibleOutgoing(columnId, parentId) != null) return;
+
+    final candidate = await _branchPathService.resolveDefaultCandidate(
+      parentId,
+      Direction.outgoing,
+    );
+    if (candidate?.id != messageId) return;
+
+    await defaultPage(columnId, parentId, Direction.outgoing, kDefaultBatch);
   }
 
   static bool _isToastEligibleRole(MessageRole role) =>
@@ -1012,4 +1217,20 @@ class PageResult {
     required this.hasMore,
     required this.stitchCount,
   });
+}
+
+class _HeldBotInvoke {
+  const _HeldBotInvoke({
+    required this.columnId,
+    required this.triggerId,
+    required this.botId,
+    required this.context,
+    required this.cwd,
+  });
+
+  final String columnId;
+  final String triggerId;
+  final String botId;
+  final List<Map<String, dynamic>> context;
+  final String? cwd;
 }

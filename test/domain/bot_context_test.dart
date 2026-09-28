@@ -24,13 +24,20 @@ void main() {
       expect(registry.requiresCwd('chatgpt'), isFalse);
     });
 
-    test('fromWire maps requires_cwd', () {
+    test('fromWire maps requires_cwd and requires_auth', () {
       final fromWire = BotRegistry.fromWire([
-        {'id': 'cursor', 'aliases': ['cursor'], 'requires_cwd': true},
+        {
+          'id': 'cursor',
+          'aliases': ['cursor'],
+          'requires_cwd': true,
+          'requires_auth': true,
+        },
         {'id': 'chatgpt', 'aliases': ['chatgpt']},
       ]);
       expect(fromWire.requiresCwd('cursor'), isTrue);
+      expect(fromWire.requiresAuth('cursor'), isTrue);
       expect(fromWire.requiresCwd('chatgpt'), isFalse);
+      expect(fromWire.requiresAuth('chatgpt'), isFalse);
     });
 
     test('dedupes and ignores unknown tags', () {

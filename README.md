@@ -93,32 +93,6 @@ Each layer (Dart, bridge, adapter, runtime) communicates with its neighbors via 
 
 The adapter and runtime together decide *how to respond* — the rest is product, transport, validation, and enforcement. 
 
-#### Filesystem Snapshots
-
-> A filesystem-backed invocation executes against a materialized environment derived from the parent message’s environment state. Stitch snapshots resulting state and associates it with emitted message nodes.
-
-Stitch versions your working directory recursively (up to a practical size constraint) when you pass it to a model as your `cwd` (generally optional) for the purposes of rollback and branch comparison. We do not sandbox the environment based on the `cwd`. Model sandboxing and permissioning (confinement) belongs to the runtime. Snapshot refs are associated directly with message nodes - "what the cwd looked like at this message". One nuance here: behavior can exceed cwd scope, via shell commands, shared config modifications, external tooling, etc. The snapshot is technically best-effort and practical. Materialized directories are ephemeral realizations of persistent snapshot state for model invocation context. Snapshots are authoritative; working directories are caches. Simplifies cleanup, lazy materialization, branching, and rematerialization. The user's actual "working directory" they see on their filesystem and test on is independent of either of these and automatically fast-forwarded to to the most recent response with UI on the node for clarity. 
-
-Snapshots use Git’s object database as a content-addressed store, but Stitch does not use Git as a working-copy manager. Stitch walks the environment itself, hashes file contents, constructs tree objects, and records the resulting commit/tree identifier. This avoids `.gitignore`, nested-repository gitlinks, and mutation of the user’s branch or staging area. Untracked files are generally included subject to explicit space-policy exclusions; nested repositories are treated as ordinary filesystem content for snapshot purposes; actual repository HEADs are recorded separately as metadata/indexing; deduplication comes from Git object identity.
-
-Materialization and snapshotting are lazy and content-addressed. Concurrent invocations require separate working directories. Large generated trees remain the principal practical cost; exclusions such as `node_modules`, `.venv`, and build outputs are therefore a storage policy rather than `.gitignore` semantics. We accept non-trivial snapshot materialization and persistent timing as negligible next to model response times, and the practical size constraint that caps this functionality reflects that principle. 
-
-##### Working session: git-stitch versioning
-
-> Status: exploratory working notes, not a decision.
-
-The bespoke filesystem-walk snapshot model above is local-first: it assumes Stitch has direct filesystem access to hash and materialize state. That assumption breaks for cloud/VM-based runtimes (e.g. a routine agent completing an issue on a remote box and pushing a notification) — there's no directory to walk, and the natural unit of state a remote runtime already produces is a git commit on a branch.
-
-Working direction: represent message ↔ environment state as real git commits/refs instead of custom tree objects, so the same representation works whether the runtime is local or remote.
-
-- **Commit, don't walk.** Whichever runtime is invoked (local bridge or remote VM) writes a commit — including untracked files via a forced add into an internal index — to a **Stitch-owned ref** (e.g. `refs/stitch/<message-id>`), never to the user's checked-out branch or staging area. This preserves the existing non-mutation guarantee while keeping untracked-file capture.
-- **Fetchability.** A commit SHA is only useful if it's reachable. The Stitch-owned ref is what keeps it alive (survives GC, fetchable from another machine) — SHA alone isn't enough if the commit only exists on the VM that made it and was never pushed anywhere.
-- **Repo identity.** Messages can't reference a local path (doesn't resolve across devices) or a bare remote URL (a repo can have multiple remotes/forks). Instead, reference a Stitch-registered repo entity — canonical remote URL(s) — by ID.
-- **What the message carries**: `{repo_id, commit_sha, stitch_ref}`, plus branch name as display-only metadata (branches move; the SHA is the precise pointer).
-- **"Apply locally"** resolves `repo_id` to a local clone by matching remote URL against the current cwd/column, `git fetch`s the `stitch_ref`, and checks out the SHA. If no local clone matches, the same action becomes a clone instead of a checkout.
-- **Forking is unaffected.** The reply/stitch message graph still owns comparison and branching between runtimes/models — this only changes how a single message's environment state is represented and transported, not how messages relate to each other.
-- **Known tradeoff.** This narrows snapshot support to git repos only — a non-git cwd would need a degraded/unsupported path. Considered acceptable since cloud runtimes require a git repo to operate against a branch anyway.
-
 #### Cloud-based Interaction
 - Bridge handles responses in-process with arbitrarily finite response time; human responses aren't instantaneous, and conceptually neither are model responses.
 - Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). TBD: good UI representations for cloud vs. locally _registered_, plus common cross-cutting cases (cloud-backed response generation, local response gen + external tooling, fully local, simply human, etc) and a coherent, comprehensive definition on the user level (to be advertised by the bot registry for bots registered locally, or otherwise inferred from cloud user attributes including `is-bot`).
@@ -142,7 +116,7 @@ Dart and the Python bridge share one log level and write sibling rotating files 
 
 Levels: `TRACE` \| `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. Flutter loads `.env` at startup and passes both knobs into the Python subprocess, so one setting covers both processes.
 
-Bot keys in the same `.env`: `OPENAI_API_KEY` (Completions / `@chatgpt`), `CURSOR_API_KEY` (local Cursor SDK / `@cursor`). Cursor’s SDK runs in `python-server/runtimes/cursor/venv` — not the bridge venv.
+Bot keys in the same `.env`: `OPENAI_API_KEY` (Completions / `@chatgpt`). `CURSOR_API_KEY` is an optional override for the bundled Cursor CLI (`@cursor`); when it is unset, the column sign-in button asks Cursor's auth handler to run `agent login`, which opens the system default browser and stores its own credentials. The CLI package is fetched by `tool/fetch_cursor_agent.sh` into `third_party/cursor-agent/` and copied into the AppImage next to the Python bridge.
 
 | File | Writer | Rotation |
 | --- | --- | --- |

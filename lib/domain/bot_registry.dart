@@ -11,6 +11,7 @@ class BotSpec {
     required this.id,
     required this.aliases,
     this.requiresCwd = false,
+    this.requiresAuth = false,
   });
 
   /// Canonical bot id sent on the wire (e.g. `chatgpt`).
@@ -22,6 +23,11 @@ class BotSpec {
   /// When true and the column has no cwd, the composer shows a warning and
   /// the bridge skips adapter dispatch. Not an error.
   final bool requiresCwd;
+
+  /// When true, the bridge skips dispatch until the bot is signed in.
+  /// The composer shows a sign-in button; that bot's handler decides what
+  /// signing in runs.
+  final bool requiresAuth;
 }
 
 class BotMention {
@@ -57,6 +63,7 @@ class BotRegistry {
           id: entry['id'] as String,
           aliases: (entry['aliases'] as List).cast<String>().toSet(),
           requiresCwd: entry['requires_cwd'] == true,
+          requiresAuth: entry['requires_auth'] == true,
         ),
     ]);
   }
@@ -65,6 +72,8 @@ class BotRegistry {
   final Map<String, String> _aliasToId;
 
   bool requiresCwd(String botId) => _byId[botId]?.requiresCwd ?? false;
+
+  bool requiresAuth(String botId) => _byId[botId]?.requiresAuth ?? false;
 
   /// Returns distinct local bots tagged in [content], in first-seen order.
   List<BotMention> parseMentions(String content) {

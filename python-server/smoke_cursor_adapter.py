@@ -1,6 +1,7 @@
-"""End-to-end smoke: cursor_adapter.handle → real runner/API.
+"""End-to-end smoke: cursor_adapter.handle → bundled Cursor CLI.
 
-Run from python-server with the *bridge* venv (stdlib + project modules):
+Run from python-server with the bridge venv, after tool/fetch_cursor_agent.sh.
+Uses CURSOR_API_KEY when set; otherwise the CLI's stored login.
     ./venv/bin/python smoke_cursor_adapter.py
 """
 

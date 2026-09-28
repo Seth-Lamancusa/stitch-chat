@@ -42,6 +42,7 @@ void main() async {
   await windowManager.setTitle('Stitch');
 
   final stitchEnv = StitchEnv.load();
+  await stitchEnv.resolveLogDir();
   await StitchLog.initialize(logDir: stitchEnv.logDir, level: stitchEnv.logLevel);
 
   void handleTerminationSignal(_) {

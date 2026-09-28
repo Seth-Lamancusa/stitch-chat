@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'stitch_log_level.dart';
 
@@ -72,13 +73,43 @@ class StitchEnv {
   StitchLogLevel get logLevel =>
       StitchLogLevel.parse(values['STITCH_LOG_LEVEL'], fallback: StitchLogLevel.debug);
 
-  /// Directory for `dart.log` / `python.log`. Defaults to `<projectRoot>/logs`.
+  String? _resolvedLogDir;
+
+  /// Directory for `dart.log` / `python.log`.
+  ///
+  /// [resolveLogDir] must be awaited once (done in `main()` right after
+  /// `StitchEnv.load()`) before this is read.
   String get logDir {
+    final resolved = _resolvedLogDir;
+    if (resolved == null) {
+      throw StateError('StitchEnv.resolveLogDir() must be awaited before logDir is read.');
+    }
+    return resolved;
+  }
+
+  /// Resolves and caches [logDir]. Honors `STITCH_LOG_DIR` when set;
+  /// otherwise defaults to `<app support dir>/logs`. A packaged build
+  /// (AppImage, installed .deb, etc.) runs with an unpredictable — and for
+  /// an AppImage's read-only squashfs mount, unwritable — cwd, so unlike
+  /// [pythonServerDir] this can't fall back to `<projectRoot>/logs` by
+  /// default; it only does so if the platform app-support directory itself
+  /// can't be resolved (e.g. under test).
+  Future<String> resolveLogDir() async {
     final override = values['STITCH_LOG_DIR']?.trim();
     if (override != null && override.isNotEmpty) {
-      return p.isAbsolute(override) ? override : p.join(projectRoot, override);
+      final resolved = p.isAbsolute(override) ? override : p.join(projectRoot, override);
+      _resolvedLogDir = resolved;
+      return resolved;
     }
-    return p.join(projectRoot, 'logs');
+    String resolved;
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      resolved = p.join(supportDir.path, 'logs');
+    } catch (_) {
+      resolved = p.join(projectRoot, 'logs');
+    }
+    _resolvedLogDir = resolved;
+    return resolved;
   }
 
   /// When true, seed typing-indicator fixtures and treat `[[mockTyping:…]]`

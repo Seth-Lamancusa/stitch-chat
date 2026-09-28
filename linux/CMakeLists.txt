@@ -130,8 +130,30 @@ endif()
 # Bundle the Python bridge server (including its venv) so the packaged app
 # doesn't depend on `flutter run`'s dev-mode cwd to find it. StitchEnv looks
 # for this at "<executable dir>/data/python-server" at runtime.
+# USE_SOURCE_PERMISSIONS: the default for install(DIRECTORY) is 644, which
+# strips +x from vendored launchers in other runtime trees. Those live
+# inside the AppImage mount and fail with EACCES if they are not executable.
+# The Cursor SDK venv is not shipped; @cursor uses the bundled CLI.
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../python-server"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime
+  USE_SOURCE_PERMISSIONS
   PATTERN "__pycache__" EXCLUDE
-  PATTERN "*.pyc" EXCLUDE)
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN "runtimes/cursor/venv/*" EXCLUDE)
+
+# Bundled Cursor CLI (cursor-agent). Fetched by tool/fetch_cursor_agent.sh
+# into third_party/cursor-agent (gitignored). Runtime resolves
+# "<executable>/data/cursor-agent/cursor-agent". Missing in dev is a warning
+# so `flutter run` still configures; a package built without the fetch ships
+# an unavailable @cursor bot.
+set(CURSOR_AGENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cursor-agent")
+if(EXISTS "${CURSOR_AGENT_DIR}/cursor-agent")
+  install(DIRECTORY "${CURSOR_AGENT_DIR}"
+    DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+    COMPONENT Runtime
+    USE_SOURCE_PERMISSIONS)
+else()
+  message(WARNING
+    "third_party/cursor-agent missing — run tool/fetch_cursor_agent.sh before packaging")
+endif()

@@ -83,6 +83,10 @@ class ColumnUiState {
   /// right after send (then fades to [CwdWarningPhase.none]).
   CwdWarningPhase cwdWarningPhase = CwdWarningPhase.none;
 
+  /// Bots this column is about to message (or already tried to) that still
+  /// need sign-in. Shared auth state, filtered to this column's recipients.
+  List<BotAuthPrompt> authPrompts = const [];
+
   ColumnUiState({
     required this.id,
     this.width,
@@ -104,9 +108,23 @@ class ColumnUiState {
   });
 }
 
-/// Composer banner for bots that require a column cwd.
-enum CwdWarningPhase {
-  none,
-  advisory,
-  sent,
-}
+  /// Composer banner for bots that require a column cwd.
+  enum CwdWarningPhase {
+    none,
+    advisory,
+    sent,
+  }
+
+  /// Sign-in prompt for one bot, copied onto the column so the composer
+  /// can render it without reading the bridge.
+  class BotAuthPrompt {
+    const BotAuthPrompt({
+      required this.botId,
+      required this.state,
+      this.detail,
+    });
+
+    final String botId;
+    final String state;
+    final String? detail;
+  }

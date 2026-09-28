@@ -26,6 +26,7 @@ class PythonProcessService {
     final serverDir = Directory(stitchEnv.pythonServerDir);
     final pythonBin = '${serverDir.path}/venv/bin/python';
 
+    if (env == null) await stitchEnv.resolveLogDir();
     await Directory(stitchEnv.logDir).create(recursive: true);
 
     final environment = stitchEnv.pythonProcessEnvironment();
