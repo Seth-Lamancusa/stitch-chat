@@ -26,6 +26,9 @@ final Map<int, Migration> migrations = {
   4: (m, db) async {
     await m.addColumn(db.columns, db.columns.cwd);
   },
+  5: (m, db) async {
+    await m.addColumn(db.replyEdges, db.replyEdges.hidden);
+  },
 };
 
 Future<void> runMigrations(Migrator m, AppDatabase db, int from, int to) async {

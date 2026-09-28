@@ -3,7 +3,7 @@
 /// `PersistedMessage` types. Thread topology is not modeled here: it lives
 /// exclusively in edge tables owned by [MessageRepository], not as fields
 /// on this class.
-enum MessageRole { user, localBot, functionCall, functionResult }
+enum MessageRole { user, localBot, functionCall, functionResult, thinking }
 
 /// Who a message is addressed to, for [MessageRepository.addRecipientEdge].
 enum RecipientKind { localBot, cloudUser }

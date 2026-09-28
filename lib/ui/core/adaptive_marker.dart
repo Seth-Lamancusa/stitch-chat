@@ -21,16 +21,22 @@ class AdaptiveMarker extends StatelessWidget {
     required this.isTop,
     required this.state,
     this.stitchCount = 0,
+    this.hiddenCount = 0,
     this.errorMessage,
     this.onLoadStitches,
+    this.onRevealHidden,
     this.onRetry,
   });
 
   final bool isTop;
   final MarkerVisualState state;
   final int stitchCount;
+
+  /// Hidden-reply neighbors at this reply dead-end (Surgical Loading).
+  final int hiddenCount;
   final String? errorMessage;
   final VoidCallback? onLoadStitches;
+  final VoidCallback? onRevealHidden;
   final VoidCallback? onRetry;
 
   @override
@@ -67,6 +73,10 @@ class AdaptiveMarker extends StatelessWidget {
               leading: const _DividerDots(),
               text: isTop ? 'Beginning of thread' : 'End of thread',
             ),
+            if (hiddenCount > 0) ...[
+              const SizedBox(height: 8),
+              _RevealHiddenButton(onPressed: onRevealHidden),
+            ],
             if (stitchCount > 0) ...[
               const SizedBox(height: 8),
               _StitchLoadButton(count: stitchCount, onPressed: onLoadStitches),
@@ -128,6 +138,55 @@ class _DividerDots extends StatelessWidget {
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.24),
             shape: BoxShape.circle,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RevealHiddenButton extends StatelessWidget {
+  const _RevealHiddenButton({this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(14),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onPressed,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: colorScheme.onSurface.withValues(alpha: 0.28),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.visibility_outlined,
+                  size: 14,
+                  color: colorScheme.onSurface.withValues(alpha: 0.75),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'Reveal hidden thread',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: colorScheme.onSurface.withValues(alpha: 0.85),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

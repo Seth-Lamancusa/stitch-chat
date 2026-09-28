@@ -453,8 +453,21 @@ class $ReplyEdgesTable extends ReplyEdges
       'REFERENCES messages (id) ON DELETE CASCADE',
     ),
   );
+  static const VerificationMeta _hiddenMeta = const VerificationMeta('hidden');
   @override
-  List<GeneratedColumn> get $columns => [parentId, childId];
+  late final GeneratedColumn<bool> hidden = GeneratedColumn<bool>(
+    'hidden',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("hidden" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [parentId, childId, hidden];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -483,6 +496,12 @@ class $ReplyEdgesTable extends ReplyEdges
     } else if (isInserting) {
       context.missing(_childIdMeta);
     }
+    if (data.containsKey('hidden')) {
+      context.handle(
+        _hiddenMeta,
+        hidden.isAcceptableOrUnknown(data['hidden']!, _hiddenMeta),
+      );
+    }
     return context;
   }
 
@@ -500,6 +519,10 @@ class $ReplyEdgesTable extends ReplyEdges
         DriftSqlType.string,
         data['${effectivePrefix}child_id'],
       )!,
+      hidden: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}hidden'],
+      )!,
     );
   }
 
@@ -512,12 +535,22 @@ class $ReplyEdgesTable extends ReplyEdges
 class ReplyEdge extends DataClass implements Insertable<ReplyEdge> {
   final String parentId;
   final String childId;
-  const ReplyEdge({required this.parentId, required this.childId});
+
+  /// When true, default path walks skip this hop; UI must explicitly reveal
+  /// (AdaptiveMarker / sibling nav). Stays true after reveal — visibility is
+  /// column pointer state, not a cleared flag.
+  final bool hidden;
+  const ReplyEdge({
+    required this.parentId,
+    required this.childId,
+    required this.hidden,
+  });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['parent_id'] = Variable<String>(parentId);
     map['child_id'] = Variable<String>(childId);
+    map['hidden'] = Variable<bool>(hidden);
     return map;
   }
 
@@ -525,6 +558,7 @@ class ReplyEdge extends DataClass implements Insertable<ReplyEdge> {
     return ReplyEdgesCompanion(
       parentId: Value(parentId),
       childId: Value(childId),
+      hidden: Value(hidden),
     );
   }
 
@@ -536,6 +570,7 @@ class ReplyEdge extends DataClass implements Insertable<ReplyEdge> {
     return ReplyEdge(
       parentId: serializer.fromJson<String>(json['parentId']),
       childId: serializer.fromJson<String>(json['childId']),
+      hidden: serializer.fromJson<bool>(json['hidden']),
     );
   }
   @override
@@ -544,17 +579,21 @@ class ReplyEdge extends DataClass implements Insertable<ReplyEdge> {
     return <String, dynamic>{
       'parentId': serializer.toJson<String>(parentId),
       'childId': serializer.toJson<String>(childId),
+      'hidden': serializer.toJson<bool>(hidden),
     };
   }
 
-  ReplyEdge copyWith({String? parentId, String? childId}) => ReplyEdge(
-    parentId: parentId ?? this.parentId,
-    childId: childId ?? this.childId,
-  );
+  ReplyEdge copyWith({String? parentId, String? childId, bool? hidden}) =>
+      ReplyEdge(
+        parentId: parentId ?? this.parentId,
+        childId: childId ?? this.childId,
+        hidden: hidden ?? this.hidden,
+      );
   ReplyEdge copyWithCompanion(ReplyEdgesCompanion data) {
     return ReplyEdge(
       parentId: data.parentId.present ? data.parentId.value : this.parentId,
       childId: data.childId.present ? data.childId.value : this.childId,
+      hidden: data.hidden.present ? data.hidden.value : this.hidden,
     );
   }
 
@@ -562,44 +601,51 @@ class ReplyEdge extends DataClass implements Insertable<ReplyEdge> {
   String toString() {
     return (StringBuffer('ReplyEdge(')
           ..write('parentId: $parentId, ')
-          ..write('childId: $childId')
+          ..write('childId: $childId, ')
+          ..write('hidden: $hidden')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(parentId, childId);
+  int get hashCode => Object.hash(parentId, childId, hidden);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is ReplyEdge &&
           other.parentId == this.parentId &&
-          other.childId == this.childId);
+          other.childId == this.childId &&
+          other.hidden == this.hidden);
 }
 
 class ReplyEdgesCompanion extends UpdateCompanion<ReplyEdge> {
   final Value<String> parentId;
   final Value<String> childId;
+  final Value<bool> hidden;
   final Value<int> rowid;
   const ReplyEdgesCompanion({
     this.parentId = const Value.absent(),
     this.childId = const Value.absent(),
+    this.hidden = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ReplyEdgesCompanion.insert({
     required String parentId,
     required String childId,
+    this.hidden = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : parentId = Value(parentId),
        childId = Value(childId);
   static Insertable<ReplyEdge> custom({
     Expression<String>? parentId,
     Expression<String>? childId,
+    Expression<bool>? hidden,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
       if (parentId != null) 'parent_id': parentId,
       if (childId != null) 'child_id': childId,
+      if (hidden != null) 'hidden': hidden,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -607,11 +653,13 @@ class ReplyEdgesCompanion extends UpdateCompanion<ReplyEdge> {
   ReplyEdgesCompanion copyWith({
     Value<String>? parentId,
     Value<String>? childId,
+    Value<bool>? hidden,
     Value<int>? rowid,
   }) {
     return ReplyEdgesCompanion(
       parentId: parentId ?? this.parentId,
       childId: childId ?? this.childId,
+      hidden: hidden ?? this.hidden,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -625,6 +673,9 @@ class ReplyEdgesCompanion extends UpdateCompanion<ReplyEdge> {
     if (childId.present) {
       map['child_id'] = Variable<String>(childId.value);
     }
+    if (hidden.present) {
+      map['hidden'] = Variable<bool>(hidden.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -636,6 +687,7 @@ class ReplyEdgesCompanion extends UpdateCompanion<ReplyEdge> {
     return (StringBuffer('ReplyEdgesCompanion(')
           ..write('parentId: $parentId, ')
           ..write('childId: $childId, ')
+          ..write('hidden: $hidden, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3006,12 +3058,14 @@ typedef $$ReplyEdgesTableCreateCompanionBuilder =
     ReplyEdgesCompanion Function({
       required String parentId,
       required String childId,
+      Value<bool> hidden,
       Value<int> rowid,
     });
 typedef $$ReplyEdgesTableUpdateCompanionBuilder =
     ReplyEdgesCompanion Function({
       Value<String> parentId,
       Value<String> childId,
+      Value<bool> hidden,
       Value<int> rowid,
     });
 
@@ -3063,6 +3117,11 @@ class $$ReplyEdgesTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<bool> get hidden => $composableBuilder(
+    column: $table.hidden,
+    builder: (column) => ColumnFilters(column),
+  );
+
   $$MessagesTableFilterComposer get parentId {
     final $$MessagesTableFilterComposer composer = $composerBuilder(
       composer: this,
@@ -3119,6 +3178,11 @@ class $$ReplyEdgesTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<bool> get hidden => $composableBuilder(
+    column: $table.hidden,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$MessagesTableOrderingComposer get parentId {
     final $$MessagesTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -3175,6 +3239,9 @@ class $$ReplyEdgesTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<bool> get hidden =>
+      $composableBuilder(column: $table.hidden, builder: (column) => column);
+
   $$MessagesTableAnnotationComposer get parentId {
     final $$MessagesTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -3252,20 +3319,24 @@ class $$ReplyEdgesTableTableManager
               ({
                 Value<String> parentId = const Value.absent(),
                 Value<String> childId = const Value.absent(),
+                Value<bool> hidden = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ReplyEdgesCompanion(
                 parentId: parentId,
                 childId: childId,
+                hidden: hidden,
                 rowid: rowid,
               ),
           createCompanionCallback:
               ({
                 required String parentId,
                 required String childId,
+                Value<bool> hidden = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ReplyEdgesCompanion.insert(
                 parentId: parentId,
                 childId: childId,
+                hidden: hidden,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

@@ -1,0 +1,9 @@
+# Build: flutter_distributor release --name production
+output: dist/
+releases:
+  - name: production
+    jobs:
+      - name: linux-appimage
+        package:
+          platform: linux
+          target: appimage

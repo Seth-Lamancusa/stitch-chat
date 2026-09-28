@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 
 from cursor_adapter import handle
+import protocol
 
 
 async def main() -> None:
@@ -18,7 +19,13 @@ async def main() -> None:
 
     async def send(envelope: dict) -> None:
         sent.append(envelope)
-        print("ENVELOPE", envelope.get("type"), flush=True)
+        print(
+            "ENVELOPE",
+            envelope.get("type"),
+            envelope.get("role"),
+            envelope.get("is_final"),
+            flush=True,
+        )
 
     await handle(
         parent_message_id="trig-smoke",
@@ -37,10 +44,15 @@ async def main() -> None:
 
     types = [e.get("type") for e in sent]
     print("TYPES", types)
-    assert types == ["message_start", "message_end"], sent
-    assert sent[1]["content"], sent[1]
-    print("CONTENT", repr(sent[1]["content"]))
-    print("USAGE", sent[1].get("usage"))
+    assert protocol.ERROR not in types, sent
+    assert protocol.MESSAGE_START in types
+    assert protocol.MESSAGE_END in types
+    finals = [e for e in sent if e.get("type") == protocol.MESSAGE_END and e.get("is_final")]
+    assert len(finals) == 1, sent
+    assert finals[0].get("content"), finals[0]
+    assert all(e.get("invoke_root_id") == "trig-smoke" for e in sent if e.get("type") != protocol.ERROR)
+    print("CONTENT", repr(finals[0]["content"]))
+    print("USAGE", finals[0].get("usage"))
     print("SHIM_OK")
 
 

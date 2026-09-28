@@ -29,8 +29,12 @@ and the Cursor `/sdk` skill. Pin a usage-capable `cursor-sdk` (≥ ~1.0.23 for
 4. One-shot and durable are the same stack (`create`/`resume` + `send` +
    `wait`); throw the Run away when you don’t need the stream.
 
-Non-goals for v1: multi-part tool/thinking messages, cloud runtime, MCP,
-Gemini-style projectors, billed `get_usage()`, UI for active-context budgets.
+Non-goals for original v1: cloud runtime, MCP, Gemini-style projectors,
+billed `get_usage()`, UI for active-context budgets.
+
+**Shipped after v1:** multi-part thinking / tool / assistant emissions as a
+side-channel fork + reply branch — see
+[`docs/cursor-side-channel-fork.md`](../cursor-side-channel-fork.md) (as-built).
 
 ## Locked decisions
 
@@ -168,7 +172,7 @@ column budgets are out of scope for this plan (wire + log first).
 ### 5. Follow-ups (separate plans)
 
 - Persist fingerprint → `agent_id` map across bridge restarts.
-- Multi-part tool/thinking emissions.
+- ~~Multi-part tool/thinking emissions.~~ → [`docs/cursor-side-channel-fork.md`](../cursor-side-channel-fork.md)
 - Model/version from `@cursor:…` tags.
 - Column/active-context token UI.
 

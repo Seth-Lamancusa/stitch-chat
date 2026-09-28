@@ -27,6 +27,7 @@ _ROLE_TO_COMPLETIONS = {
     "localBot": "assistant",
     "functionCall": "assistant",
     "functionResult": "user",
+    "thinking": "assistant",
 }
 
 
@@ -87,6 +88,29 @@ async def stream_reply(
             }
         )
         return
+
+    typing_target = parent_message_id
+    if typing_target:
+        await send(
+            protocol.cue_envelope(
+                author_id=bot_id,
+                target_message_id=typing_target,
+                typing=True,
+            )
+        )
+
+    async def _clear_typing() -> None:
+        nonlocal typing_target
+        if not typing_target:
+            return
+        await send(
+            protocol.cue_envelope(
+                author_id=bot_id,
+                target_message_id=typing_target,
+                typing=False,
+            )
+        )
+        typing_target = None
 
     client_kwargs: dict[str, Any] = {}
     if api_key:
@@ -188,6 +212,7 @@ async def stream_reply(
                 "error": str(exc),
             }
         )
+        await _clear_typing()
         return
 
     end: dict[str, Any] = {
@@ -197,6 +222,7 @@ async def stream_reply(
         "bot_id": bot_id,
         "role": "localBot",
         "content": full_content,
+        "is_final": True,
     }
     if usage is not None:
         end["usage"] = usage
@@ -209,3 +235,4 @@ async def stream_reply(
         usage,
     )
     await send(end)
+    await _clear_typing()

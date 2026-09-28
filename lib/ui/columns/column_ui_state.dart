@@ -54,11 +54,13 @@ class ColumnUiState {
 
   MarkerVisualState topMarker;
   int topStitchCount;
+  int topHiddenCount;
   bool topLoading;
   String? topError;
 
   MarkerVisualState bottomMarker;
   int bottomStitchCount;
+  int bottomHiddenCount;
   bool bottomLoading;
   String? bottomError;
 
@@ -90,10 +92,12 @@ class ColumnUiState {
     this.cwd,
     this.topMarker = MarkerVisualState.end,
     this.topStitchCount = 0,
+    this.topHiddenCount = 0,
     this.topLoading = false,
     this.topError,
     this.bottomMarker = MarkerVisualState.end,
     this.bottomStitchCount = 0,
+    this.bottomHiddenCount = 0,
     this.bottomLoading = false,
     this.bottomError,
     this.replyingToMessageId,

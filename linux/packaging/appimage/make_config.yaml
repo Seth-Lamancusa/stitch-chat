@@ -1,0 +1,19 @@
+display_name: Stitch Chat
+
+icon: assets/images/stitch_logo.png
+
+keywords:
+  - Stitch
+  - Chat
+  - AI
+  - Agent
+
+generic_name: Chat Application
+
+categories:
+  - Network
+  - Utility
+
+startup_notify: true
+
+include: []
