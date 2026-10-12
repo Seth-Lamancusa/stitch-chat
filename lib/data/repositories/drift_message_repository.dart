@@ -1,6 +1,9 @@
 import 'package:drift/drift.dart';
 
+import '../models/cloud_sync_status.dart';
 import '../models/message.dart';
+import '../models/message_tag.dart';
+import '../models/participant_profile.dart';
 import '../services/app_database.dart';
 import 'message_repository.dart';
 
@@ -19,6 +22,9 @@ class DriftMessageRepository implements MessageRepository {
             content: message.content,
             gitCommit: Value(message.gitCommit),
             createdAt: Value(message.createdAt),
+            cloudMessageId: Value(message.cloudMessageId),
+            syncStatus: Value(message.syncStatus),
+            syncError: Value(message.syncError),
           ),
         );
   }
@@ -134,12 +140,26 @@ class DriftMessageRepository implements MessageRepository {
   }
 
   @override
-  Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind) {
+  Future<void> addRecipientEdge(
+    String messageId,
+    String recipientId,
+    RecipientKind kind, {
+    bool isCloudBot = false,
+    bool isPublic = true,
+    bool notify = true,
+    String? addedBy,
+    DateTime? addedAt,
+  }) {
     return _db.into(_db.recipientEdges).insertOnConflictUpdate(
           RecipientEdgesCompanion.insert(
             messageId: messageId,
             recipientId: recipientId,
             kind: kind,
+            isCloudBot: Value(isCloudBot),
+            isPublic: Value(isPublic),
+            notify: Value(notify),
+            addedBy: Value(addedBy),
+            addedAt: Value(addedAt),
           ),
         );
   }
@@ -149,7 +169,115 @@ class DriftMessageRepository implements MessageRepository {
     final rows = await (_db.select(_db.recipientEdges)
           ..where((t) => t.messageId.equals(messageId)))
         .get();
-    return rows.map((row) => RecipientRef(recipientId: row.recipientId, kind: row.kind)).toList();
+    return rows
+        .map(
+          (row) => RecipientRef(
+            recipientId: row.recipientId,
+            kind: row.kind,
+            isCloudBot: row.isCloudBot,
+            isPublic: row.isPublic,
+            notify: row.notify,
+            addedBy: row.addedBy,
+            addedAt: row.addedAt,
+          ),
+        )
+        .toList();
+  }
+
+  @override
+  Future<void> setMessageTags(String messageId, List<MessageTag> tags) {
+    return _db.transaction(() async {
+      await (_db.delete(_db.messageTags)
+            ..where((t) => t.messageId.equals(messageId)))
+          .go();
+      for (final tag in tags) {
+        await _db.into(_db.messageTags).insert(
+              MessageTagsCompanion.insert(
+                messageId: messageId,
+                name: tag.name,
+                createdAt: Value(tag.createdAt),
+                addedBy: Value(tag.addedBy),
+                addedByTag: Value(tag.addedByTag),
+              ),
+            );
+      }
+    });
+  }
+
+  @override
+  Future<List<MessageTag>> getMessageTags(String messageId) async {
+    final rows = await (_db.select(_db.messageTags)
+          ..where((t) => t.messageId.equals(messageId))
+          ..orderBy([(t) => OrderingTerm.asc(t.name)]))
+        .get();
+    return [
+      for (final row in rows)
+        MessageTag(
+          name: row.name,
+          createdAt: row.createdAt,
+          addedBy: row.addedBy,
+          addedByTag: row.addedByTag,
+        ),
+    ];
+  }
+
+  @override
+  Future<String?> resolveGraphMessageId(String cloudOrLocalId) async {
+    final direct = await getMessage(cloudOrLocalId);
+    if (direct != null) return direct.id;
+    final byCloud = await getMessageByCloudId(cloudOrLocalId);
+    return byCloud?.id;
+  }
+
+  @override
+  Future<Message?> getMessageByCloudId(String cloudMessageId) async {
+    final row = await (_db.select(_db.messages)
+          ..where((t) => t.cloudMessageId.equals(cloudMessageId)))
+        .getSingleOrNull();
+    return row == null ? null : _toMessage(row);
+  }
+
+  @override
+  Future<void> updateCloudSync({
+    required String localMessageId,
+    CloudSyncStatus? syncStatus,
+    String? cloudMessageId,
+    String? syncError,
+  }) {
+    return (_db.update(_db.messages)..where((t) => t.id.equals(localMessageId))).write(
+          MessagesCompanion(
+            syncStatus: syncStatus == null ? const Value.absent() : Value(syncStatus),
+            cloudMessageId:
+                cloudMessageId == null ? const Value.absent() : Value(cloudMessageId),
+            syncError: syncError == null ? const Value.absent() : Value(syncError),
+          ),
+        );
+  }
+
+  @override
+  Future<void> upsertParticipantProfile(ParticipantProfile profile) {
+    return _db.into(_db.participantProfiles).insertOnConflictUpdate(
+          ParticipantProfilesCompanion.insert(
+            uid: profile.uid,
+            userTag: Value(profile.userTag),
+            displayName: Value(profile.displayName),
+            isBot: Value(profile.isBot),
+          ),
+        );
+  }
+
+  @override
+  Future<ParticipantProfile?> getParticipantProfile(String uid) async {
+    final row = await (_db.select(_db.participantProfiles)
+          ..where((t) => t.uid.equals(uid)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    return ParticipantProfile(
+      uid: row.uid,
+      userTag: row.userTag,
+      displayName: row.displayName,
+      isBot: row.isBot,
+    );
   }
 
   @override
@@ -253,6 +381,9 @@ class DriftMessageRepository implements MessageRepository {
       content: row.content,
       gitCommit: row.gitCommit,
       createdAt: row.createdAt,
+      cloudMessageId: row.cloudMessageId,
+      syncStatus: row.syncStatus,
+      syncError: row.syncError,
     );
   }
 }

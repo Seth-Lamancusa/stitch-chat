@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../data/models/message.dart';
 import '../auth/login_screen.dart';
 import '../auth/login_viewmodel.dart';
+import '../core/local_bots_modal.dart';
 import '../core/settings_modal.dart';
 import '../core/stitch_logo_title.dart';
 import '../core/theme/app_colors.dart';
@@ -69,6 +70,12 @@ class _ColumnsViewState extends State<ColumnsView> {
             mouseCursor: SystemMouseCursors.click,
             onPressed: () => vm.addColumn(),
           ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            mouseCursor: SystemMouseCursors.click,
+            onPressed: () => vm.reloadAll(reason: 'toolbar'),
+          ),
           Consumer<LoginViewModel>(
             builder: (context, loginVm, _) {
               if (!loginVm.authReady) {
@@ -102,6 +109,12 @@ class _ColumnsViewState extends State<ColumnsView> {
                 onPressed: () => showLoginModal(context),
               );
             },
+          ),
+          IconButton(
+            icon: const Icon(Icons.smart_toy_outlined),
+            tooltip: 'Local bots',
+            mouseCursor: SystemMouseCursors.click,
+            onPressed: () => showLocalBotsModal(context),
           ),
           IconButton(
             icon: const Icon(Icons.settings),

@@ -1,4 +1,7 @@
+import '../models/cloud_sync_status.dart';
 import '../models/message.dart';
+import '../models/message_tag.dart';
+import '../models/participant_profile.dart';
 import 'message_repository.dart';
 
 /// Talks to the Stitch backend's message CRUD API as an alternative
@@ -54,11 +57,27 @@ class StitchApiMessageRepository implements MessageRepository {
       _unimplemented();
 
   @override
-  Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind) =>
+  Future<void> addRecipientEdge(
+    String messageId,
+    String recipientId,
+    RecipientKind kind, {
+    bool isCloudBot = false,
+    bool isPublic = true,
+    bool notify = true,
+    String? addedBy,
+    DateTime? addedAt,
+  }) =>
       _unimplemented();
 
   @override
   Future<List<RecipientRef>> getRecipients(String messageId) => _unimplemented();
+
+  @override
+  Future<void> setMessageTags(String messageId, List<MessageTag> tags) =>
+      _unimplemented();
+
+  @override
+  Future<List<MessageTag>> getMessageTags(String messageId) => _unimplemented();
 
   @override
   Future<void> deleteMessage(String id) => _unimplemented();
@@ -69,6 +88,27 @@ class StitchApiMessageRepository implements MessageRepository {
     required String toAuthorId,
   }) =>
       _unimplemented();
+
+  @override
+  Future<String?> resolveGraphMessageId(String cloudOrLocalId) => _unimplemented();
+
+  @override
+  Future<Message?> getMessageByCloudId(String cloudMessageId) => _unimplemented();
+
+  @override
+  Future<void> updateCloudSync({
+    required String localMessageId,
+    CloudSyncStatus? syncStatus,
+    String? cloudMessageId,
+    String? syncError,
+  }) =>
+      _unimplemented();
+
+  @override
+  Future<void> upsertParticipantProfile(ParticipantProfile profile) => _unimplemented();
+
+  @override
+  Future<ParticipantProfile?> getParticipantProfile(String uid) => _unimplemented();
 
   Never _unimplemented() {
     throw UnimplementedError(

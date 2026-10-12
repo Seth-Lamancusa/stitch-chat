@@ -1,6 +1,7 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_chat/data/models/message.dart';
+import 'package:stitch_chat/data/models/message_tag.dart';
 import 'package:stitch_chat/data/repositories/drift_message_repository.dart';
 import 'package:stitch_chat/data/services/app_database.dart';
 
@@ -157,6 +158,25 @@ void main() {
     expect(recipients, hasLength(1));
     expect(recipients.single.recipientId, 'local:opencode');
     expect(recipients.single.kind, RecipientKind.localBot);
+    expect(recipients.single.isPublic, isTrue);
+    expect(recipients.single.notify, isTrue);
+  });
+
+  test('setMessageTags replaces and getMessageTags returns ordered names', () async {
+    await repo.saveMessage(msg('m1'));
+    await repo.setMessageTags('m1', [
+      MessageTag(name: 'zeta', createdAt: DateTime.utc(2026, 1, 1)),
+      MessageTag(name: 'alpha', createdAt: DateTime.utc(2026, 1, 2)),
+    ]);
+    expect(
+      (await repo.getMessageTags('m1')).map((t) => t.name),
+      ['alpha', 'zeta'],
+    );
+
+    await repo.setMessageTags('m1', [
+      MessageTag(name: 'only', createdAt: DateTime.utc(2026, 1, 3)),
+    ]);
+    expect((await repo.getMessageTags('m1')).single.name, 'only');
   });
 
   test('rewriteAuthorId updates matching message authors and is idempotent', () async {

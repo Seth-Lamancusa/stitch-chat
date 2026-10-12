@@ -1,5 +1,6 @@
 import '../../data/models/edges.dart';
 import '../../data/models/message.dart';
+import '../../data/models/participant_profile.dart';
 import '../core/adaptive_marker.dart';
 
 /// Everything a single row in a column's message list needs to render its
@@ -26,6 +27,12 @@ class MessageRowData {
   final IncomingEdges? incoming;
   final int incomingCurrentIndex;
 
+  final Set<String> highlightMentions;
+  final Set<String> highlightTags;
+
+  /// Cached cloud identity for the author label / ☁️💻 badges, when known.
+  final ParticipantProfile? authorProfile;
+
   const MessageRowData({
     required this.message,
     required this.outgoing,
@@ -33,6 +40,9 @@ class MessageRowData {
     required this.outgoingAnchorId,
     required this.incoming,
     required this.incomingCurrentIndex,
+    this.highlightMentions = const {},
+    this.highlightTags = const {},
+    this.authorProfile,
   });
 }
 
@@ -83,6 +93,9 @@ class ColumnUiState {
   /// right after send (then fades to [CwdWarningPhase.none]).
   CwdWarningPhase cwdWarningPhase = CwdWarningPhase.none;
 
+  /// Aggregate cloud sync health for the reply-connected subgraph.
+  ColumnCloudSyncState columnCloudSync = ColumnCloudSyncState.idle;
+
   ColumnUiState({
     required this.id,
     this.width,
@@ -109,4 +122,11 @@ enum CwdWarningPhase {
   none,
   advisory,
   sent,
+}
+
+/// Aggregate sync health for the reply-connected subgraph (when cloud sync on).
+enum ColumnCloudSyncState {
+  idle,
+  pending,
+  failed,
 }

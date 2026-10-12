@@ -5,15 +5,16 @@ import 'package:drift/native.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../models/cloud_sync_status.dart';
 import '../models/message.dart';
 import 'migrations.dart';
 
 part 'app_database.g.dart';
 
 /// A message node in the conversation tree. Topology is not stored here —
-/// see [ReplyEdges]/[StitchEdges]. `isStreaming` from the domain [Message]
-/// model is deliberately absent: it's live-chat-only UI state, never
-/// persisted.
+/// see [ReplyEdges]/[StitchEdges]. Transient domain fields (`isStreaming`,
+/// `isSending`) are deliberately absent: live-chat / optimistic-send UI
+/// state only, never persisted.
 @DataClassName('MessageRow')
 class Messages extends Table {
   TextColumn get id => text()();
@@ -22,6 +23,10 @@ class Messages extends Table {
   TextColumn get content => text()();
   TextColumn get gitCommit => text().nullable()();
   DateTimeColumn get createdAt => dateTime().nullable()();
+  TextColumn get cloudMessageId => text().nullable()();
+  TextColumn get syncStatus =>
+      textEnum<CloudSyncStatus>().withDefault(const Constant('none'))();
+  TextColumn get syncError => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -63,13 +68,47 @@ class StitchEdges extends Table {
 
 /// A message can address multiple recipients; `kind` only says which
 /// dispatch path handles this recipient, not delivery outcome.
+///
+/// Extra columns mirror stitch-backend `receivers` edges (CC/BCC + provenance).
 class RecipientEdges extends Table {
   TextColumn get messageId => text().references(Messages, #id, onDelete: KeyAction.cascade)();
   TextColumn get recipientId => text()();
   TextColumn get kind => textEnum<RecipientKind>()();
+  BoolColumn get isCloudBot =>
+      boolean().withDefault(const Constant(false))();
+  BoolColumn get isPublic => boolean().withDefault(const Constant(true))();
+  BoolColumn get notify => boolean().withDefault(const Constant(true))();
+  TextColumn get addedBy => text().nullable()();
+  DateTimeColumn get addedAt => dateTime().nullable()();
 
   @override
   Set<Column> get primaryKey => {messageId, recipientId};
+}
+
+/// Hashtag metadata for a message (list-authoritative; not derived from content).
+@DataClassName('MessageTagRow')
+class MessageTags extends Table {
+  TextColumn get messageId =>
+      text().references(Messages, #id, onDelete: KeyAction.cascade)();
+  TextColumn get name => text()();
+  DateTimeColumn get createdAt => dateTime().nullable()();
+  TextColumn get addedBy => text().nullable()();
+  TextColumn get addedByTag => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {messageId, name};
+}
+
+/// Cached Stitch cloud user/bot profiles for badges and mention labels.
+@DataClassName('ParticipantProfileRow')
+class ParticipantProfiles extends Table {
+  TextColumn get uid => text()();
+  TextColumn get userTag => text().nullable()();
+  TextColumn get displayName => text().nullable()();
+  BoolColumn get isBot => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {uid};
 }
 
 /// A column in the multi-column layout. No `title` column yet — added by
@@ -118,6 +157,8 @@ class ColumnBranchPointers extends Table {
   ReplyEdges,
   StitchEdges,
   RecipientEdges,
+  MessageTags,
+  ParticipantProfiles,
   Columns,
   ColumnBranchPointers,
 ])
@@ -128,7 +169,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(

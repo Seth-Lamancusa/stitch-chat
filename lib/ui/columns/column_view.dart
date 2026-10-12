@@ -6,10 +6,15 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/logging/stitch_log.dart';
+import '../../core/settings/message_font_service.dart';
 import '../../data/models/message.dart';
 import '../../data/services/mock_typing_cue.dart';
 import '../core/adaptive_marker.dart';
 import '../core/incoming_navigator.dart';
+import '../../domain/author_badge_flags.dart';
+import '../composer/draft_highlight_editing_controller.dart';
+import '../composer/mention_composer.dart';
+import '../composer/recipients_pill.dart';
 import '../core/message_card.dart';
 import '../core/outgoing_navigator.dart' show OutgoingNavArrow;
 import '../core/theme/app_colors.dart';
@@ -24,6 +29,9 @@ import 'columns_viewmodel.dart';
 /// as `SliverPadding` inset. Keep every boundary below wired to this one
 /// constant rather than a repeated literal.
 const double _kMessageRowGap = 2.0;
+
+/// Scrollable space below the end-of-thread marker (after-`center` sliver only).
+const double _kBottomThreadPadding = 400.0;
 
 /// Native folder dialog used by the column cwd editor. Tests replace this
 /// so they can return a path without opening a platform dialog.
@@ -68,10 +76,7 @@ class ColumnCwdIconButton extends StatelessWidget {
     final hasCwd = cwd != null && cwd.isNotEmpty;
     return IconButton(
       tooltip: hasCwd ? cwd : 'Set column cwd',
-      icon: Icon(
-        hasCwd ? Icons.folder : Icons.folder_outlined,
-        size: 18,
-      ),
+      icon: Icon(hasCwd ? Icons.folder : Icons.folder_outlined, size: 18),
       onPressed: () => editColumnCwd(context, state),
     );
   }
@@ -89,13 +94,18 @@ class ColumnView extends StatefulWidget {
   /// When false, cwd is expected elsewhere (e.g. single-column overlay).
   final bool showCwdInHeader;
 
+  /// Widget tests: skip composer auto-focus (caret tickers break pumpAndSettle).
+  @visibleForTesting
+  static bool debugSuppressComposerAutoFocus = false;
+
   @override
   State<ColumnView> createState() => _ColumnViewState();
 }
 
 class _ColumnViewState extends State<ColumnView> {
-  final _controller = TextEditingController();
+  final _controller = DraftHighlightEditingController();
   final _focusNode = FocusNode();
+  final _messageListKey = GlobalKey<_MessageListState>();
 
   bool _wasComposerActive = false;
   String? _wasReplyingToMessageId;
@@ -110,6 +120,7 @@ class _ColumnViewState extends State<ColumnView> {
   /// callback is too early for message-body taps: [SelectionArea] claims
   /// focus on pointer-up and would steal the caret we just placed.
   void _scheduleComposerFocus() {
+    if (ColumnView.debugSuppressComposerAutoFocus) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -131,12 +142,14 @@ class _ColumnViewState extends State<ColumnView> {
   /// column — covers Reply, new column, and click-to-activate without
   /// touching [ColumnsViewModel].
   void _focusComposerWhenShown(ColumnUiState state) {
+    if (ColumnView.debugSuppressComposerAutoFocus) return;
     if (!state.isActive) {
       _wasComposerActive = false;
       return;
     }
     final composerAppeared = !_wasComposerActive;
-    final replyTargetPinned = state.replyingToMessageId != null &&
+    final replyTargetPinned =
+        state.replyingToMessageId != null &&
         state.replyingToMessageId != _wasReplyingToMessageId;
     if (composerAppeared || replyTargetPinned) {
       _scheduleComposerFocus();
@@ -156,16 +169,55 @@ class _ColumnViewState extends State<ColumnView> {
   void _onDraftChanged() {
     if (!mounted) return;
     context.read<ColumnsViewModel>().onComposerDraftChanged(
-          widget.state.id,
-          _controller.text,
-        );
+      widget.state.id,
+      _controller.text,
+    );
   }
 
   void _send(ColumnsViewModel vm) {
     final content = _controller.text;
+    if (content.trim().isEmpty) return;
+
+    // Start send first so draft recipients/tags are snapshotted (and the
+    // optimistic row appears) before we clear the field. Clearing fires the
+    // draft listener; without a prior snapshot, reconcile against '' drops
+    // autocomplete-staged cloud @mentions (not re-derived from text alone).
+    //
+    // Mid-thread fork: keep the reply parent at a stable viewport Y, same as
+    // sibling Next/Prev ([_MessageListState.navigatePreservingPin]). Snapshot
+    // the pin id before send clears [ColumnUiState.replyingToMessageId].
+    final columnId = widget.state.id;
+    final pinParentId = vm.scrollPinParentForSend(columnId);
+    final list = _messageListKey.currentState;
+    final Future<bool> send;
+    if (pinParentId != null && list != null) {
+      send = () async {
+        var ok = false;
+        await list.navigatePreservingPin(
+          pinMessageId: pinParentId,
+          action: () async {
+            ok = await vm.sendMessage(columnId, content);
+          },
+        );
+        return ok;
+      }();
+    } else {
+      send = vm.sendMessage(columnId, content);
+    }
+
+    _controller.removeListener(_onDraftChanged);
     _controller.clear();
+    _controller.addListener(_onDraftChanged);
     _focusNode.requestFocus();
-    vm.sendMessage(widget.state.id, content);
+
+    unawaited(send.then((ok) {
+      if (!mounted || ok) return;
+      // Guard / cloud rollback left draft lists intact — restore the field.
+      _controller.value = TextEditingValue(
+        text: content,
+        selection: TextSelection.collapsed(offset: content.length),
+      );
+    }));
   }
 
   @override
@@ -208,6 +260,7 @@ class _ColumnViewState extends State<ColumnView> {
                 children: [
                   Positioned.fill(
                     child: _MessageList(
+                      key: _messageListKey,
                       state: state,
                       onColumnBodyTap: () => _activateColumn(vm, state.id),
                     ),
@@ -218,6 +271,7 @@ class _ColumnViewState extends State<ColumnView> {
                       right: 0,
                       bottom: 0,
                       child: _Composer(
+                        columnId: state.id,
                         onSend: () => _send(vm),
                         controller: _controller,
                         focusNode: _focusNode,
@@ -232,6 +286,44 @@ class _ColumnViewState extends State<ColumnView> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ColumnCloudSyncIndicator extends StatelessWidget {
+  const _ColumnCloudSyncIndicator({required this.state});
+
+  final ColumnUiState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final vm = context.watch<ColumnsViewModel>();
+    if (!vm.cloudFeaturesEnabled) return const SizedBox.shrink();
+    final sync = state.columnCloudSync;
+    if (sync == ColumnCloudSyncState.idle) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    if (sync == ColumnCloudSyncState.pending) {
+      return Tooltip(
+        message: 'Syncing messages to Stitch cloud…',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      );
+    }
+    return Tooltip(
+      message: 'Some messages failed to sync to Stitch cloud',
+      child: IconButton(
+        icon: Icon(Icons.cloud_off, size: 18, color: scheme.error),
+        onPressed: () {},
       ),
     );
   }
@@ -290,6 +382,7 @@ class _Header extends StatelessWidget {
               ),
             ),
           ),
+          _ColumnCloudSyncIndicator(state: state),
           if (showCwdInHeader) ColumnCwdIconButton(state: state),
           IconButton(
             icon: const Icon(Icons.close, size: 18),
@@ -470,8 +563,8 @@ class _PinPreservingScrollPosition extends ScrollPositionWithSingleContext {
     required this.takeArmedCorrection,
   });
 
-  final ({double? targetPixels, bool alignToMinScrollExtent})
-      Function() takeArmedCorrection;
+  final ({double? targetPixels, bool alignToMinScrollExtent}) Function()
+  takeArmedCorrection;
 
   @override
   bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
@@ -560,10 +653,7 @@ class _MessageListState extends State<_MessageList> {
     required String pinMessageId,
     required Future<void> Function() action,
   }) {
-    return _navigatePreservingPin(
-      pinMessageId: pinMessageId,
-      action: action,
-    );
+    return _navigatePreservingPin(pinMessageId: pinMessageId, action: action);
   }
 
   Future<void> _navigatePreservingPin({
@@ -573,22 +663,37 @@ class _MessageListState extends State<_MessageList> {
     // Measure before [action] while size access is legal. After the pin
     // becomes the center sliver (anchor 0, AxisDirection.down), its top
     // paints at `viewportTop - pixels`, so this target puts it back at
-    // [yBefore]. Applied during layout via [correctPixels] — not a
-    // post-frame [jumpTo] — so there's no one-frame flash.
+    // [yBefore]. Prefer applying during layout via [correctPixels] (no
+    // flash); fall back to a post-frame [jumpTo] when [action] awaited
+    // across frames (e.g. mid-thread send) and layout already ran unarmed.
     final yBefore = _messageTopY(pinMessageId);
     final viewportTop = _viewportTopY();
 
     await action();
     if (!mounted || yBefore == null || viewportTop == null) return;
 
-    // Arm *after* [action] returns: [notifyListeners] has only marked the
-    // tree dirty — the rebuild/layout that consumes this correction hasn't
-    // run yet. Arming before the await would risk an intervening frame
-    // (during the async nav) consuming the pending correction against the
-    // still-old branch.
-    _scrollController.armPinPreservation(
-      targetPixels: viewportTop - yBefore,
+    // Arm *after* [action] returns: when [notifyListeners] has only marked
+    // the tree dirty, the next layout consumes this before paint. Arming
+    // before the await would risk an intervening frame (during async work)
+    // consuming the pending correction against the still-old branch.
+    _scrollController.armPinPreservation(targetPixels: viewportTop - yBefore);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    // If a frame during [action] already laid out without the armed
+    // correction, the pin drifted — nudge offset so its top returns to
+    // [yBefore]. No-ops when the layout-time path already won.
+    final yAfter = _messageTopY(pinMessageId);
+    if (yAfter == null || !_scrollController.hasClients) return;
+    final drift = yAfter - yBefore;
+    if (drift.abs() < 0.5) return;
+    final position = _scrollController.position;
+    final target = (position.pixels + drift).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
     );
+    if ((target - position.pixels).abs() < 0.5) return;
+    position.jumpTo(target);
     await WidgetsBinding.instance.endOfFrame;
   }
 
@@ -693,9 +798,7 @@ class _MessageListState extends State<_MessageList> {
     // `state.rows` is only non-empty when an anchor exists (see the
     // early-return above).
     final anchorId = vm.anchorOf(state.id);
-    var anchorIndex = state.rows.indexWhere(
-      (r) => r.message.id == anchorId,
-    );
+    var anchorIndex = state.rows.indexWhere((r) => r.message.id == anchorId);
     // If anchor isn't on this branch (stale id / mid-update), pin to the tip.
     if (anchorIndex == -1) {
       anchorIndex = state.rows.length - 1;
@@ -719,10 +822,7 @@ class _MessageListState extends State<_MessageList> {
     final centerGapAbove = anchorIndex > 0 ? _kMessageRowGap : 0.0;
     final centerGapBelow = afterRows.isNotEmpty ? _kMessageRowGap : 0.0;
 
-    _armInitialScrollCorrectionIfNeeded(
-      anchorIndex: anchorIndex,
-      state: state,
-    );
+    _armInitialScrollCorrectionIfNeeded(anchorIndex: anchorIndex, state: state);
 
     // Eager columns inside SliverToBoxAdapters — not SliverList. A list
     // sliver only lays out the cache window and *estimates* the rest from
@@ -817,7 +917,7 @@ class _MessageListState extends State<_MessageList> {
           ),
         ),
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 70),
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, _kBottomThreadPadding),
           sliver: SliverToBoxAdapter(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -886,14 +986,36 @@ class _MessageRow extends StatelessWidget {
         row.message.authorId != null &&
         row.message.authorId == vm.currentUserId;
 
-    // Author label
+    final flags = AuthorBadgeFlags.resolve(
+      message: row.message,
+      profile: row.authorProfile,
+      registry: vm.botRegistry,
+    );
+    final authorName = isMe
+        ? 'You'
+        : row.authorProfile?.label ??
+            row.message.authorId ??
+            _defaultAuthorLabel(row.message.role);
     final authorLabel = Padding(
       padding: const EdgeInsets.only(left: 4, bottom: 4),
-      child: Text(
-        isMe
-            ? 'You'
-            : row.message.authorId ?? _defaultAuthorLabel(row.message.role),
-        style: const TextStyle(fontWeight: FontWeight.bold),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            authorName,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          if (flags.showCloud)
+            const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Text('☁️', style: TextStyle(fontSize: 12)),
+            ),
+          if (flags.showLaptop)
+            const Padding(
+              padding: EdgeInsets.only(left: 2),
+              child: Text('💻', style: TextStyle(fontSize: 12)),
+            ),
+        ],
       ),
     );
 
@@ -905,8 +1027,12 @@ class _MessageRow extends StatelessWidget {
       child: MessageCard(
         message: MockTypingCue.forDisplay(row.message),
         currentUserId: vm.currentUserId,
-        onReply: () => vm.setReplyTarget(columnId, row.message.id),
+        onReply: row.message.isSending
+            ? null
+            : () => vm.setReplyTarget(columnId, row.message.id),
         typingAuthors: vm.typingAuthorsFor(row.message),
+        highlightMentions: row.highlightMentions,
+        highlightTags: row.highlightTags,
       ),
     );
 
@@ -920,7 +1046,8 @@ class _MessageRow extends StatelessWidget {
           row.outgoingCurrentIndex >= 0 &&
           row.outgoingCurrentIndex < row.outgoing!.all.length - 1;
       // Stitch candidates follow hidden + non-hidden replies in `.all`.
-      final stitchStart = row.outgoing!.hiddenReplyOutgoing.length +
+      final stitchStart =
+          row.outgoing!.hiddenReplyOutgoing.length +
           row.outgoing!.replyOutgoing.length;
       final prevIsStitch =
           canPrev && (row.outgoingCurrentIndex - 1) >= stitchStart;
@@ -950,54 +1077,57 @@ class _MessageRow extends StatelessWidget {
       );
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (row.incoming != null)
-          // Mirror image of the sibling case: a parent swap rewrites the
-          // context *above* this message and leaves the message itself in
-          // place, and `navigateIncoming` re-anchors the column's persisted
-          // anchor to this message, so it's picked up as the scroll anchor
-          // automatically.
-          IncomingNavigator(
-            hiddenCount: row.incoming!.hiddenReplyIncoming.length,
-            replyCount: row.incoming!.replyIncoming.length,
-            stitchCount: row.incoming!.stitchedIncoming.length,
-            currentIndex: row.incomingCurrentIndex,
-            onPrev: () => _navigateIncoming(context, forward: false),
-            onNext: () => _navigateIncoming(context, forward: true),
-          ),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Author label row — only for the topmost message of a consecutive
-            // same-author run.
-            if (showAuthor)
-              Padding(
-                padding: const EdgeInsets.only(left: 22, right: 22),
-                child: authorLabel,
-              ),
-            // Message bubble row with nav buttons
-            IntrinsicHeight(
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 20,
-                    child: leftNav != null ? Center(child: leftNav) : null,
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(child: bubble),
-                  const SizedBox(width: 2),
-                  SizedBox(
-                    width: 20,
-                    child: rightNav != null ? Center(child: rightNav) : null,
-                  ),
-                ],
-              ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (row.incoming != null)
+            // Mirror image of the sibling case: a parent swap rewrites the
+            // context *above* this message and leaves the message itself in
+            // place, and `navigateIncoming` re-anchors the column's persisted
+            // anchor to this message, so it's picked up as the scroll anchor
+            // automatically.
+            IncomingNavigator(
+              hiddenCount: row.incoming!.hiddenReplyIncoming.length,
+              replyCount: row.incoming!.replyIncoming.length,
+              stitchCount: row.incoming!.stitchedIncoming.length,
+              currentIndex: row.incomingCurrentIndex,
+              onPrev: () => _navigateIncoming(context, forward: false),
+              onNext: () => _navigateIncoming(context, forward: true),
             ),
-          ],
-        ),
-      ],
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Author label row — only for the topmost message of a consecutive
+              // same-author run.
+              if (showAuthor)
+                Padding(
+                  padding: const EdgeInsets.only(left: 22, right: 22),
+                  child: authorLabel,
+                ),
+              // Message bubble row with nav buttons
+              IntrinsicHeight(
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 20,
+                      child: leftNav != null ? Center(child: leftNav) : null,
+                    ),
+                    const SizedBox(width: 2),
+                    Expanded(child: bubble),
+                    const SizedBox(width: 2),
+                    SizedBox(
+                      width: 20,
+                      child: rightNav != null ? Center(child: rightNav) : null,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1018,6 +1148,7 @@ class _MessageRow extends StatelessWidget {
 
 class _Composer extends StatelessWidget {
   const _Composer({
+    required this.columnId,
     required this.controller,
     required this.onSend,
     required this.focusNode,
@@ -1027,6 +1158,7 @@ class _Composer extends StatelessWidget {
     this.cwdWarningPhase = CwdWarningPhase.none,
   });
 
+  final String columnId;
   final TextEditingController controller;
   final VoidCallback onSend;
   final FocusNode focusNode;
@@ -1055,10 +1187,7 @@ class _Composer extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _CwdWarningBanner(
-            botIds: cwdWarningBotIds,
-            phase: cwdWarningPhase,
-          ),
+          _CwdWarningBanner(botIds: cwdWarningBotIds, phase: cwdWarningPhase),
           if (replyTarget != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
@@ -1099,58 +1228,77 @@ class _Composer extends StatelessWidget {
                 ],
               ),
             ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 6),
+              child: RecipientsPill(columnId: columnId),
+            ),
+          ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: colorScheme.surface,
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  // Ctrl+Shift+V ("paste plain") — used by dictation tools
-                  // like Vibe Typer. Flutter only binds Ctrl+V / Shift+Insert.
-                  child: Shortcuts(
-                    shortcuts: const <ShortcutActivator, Intent>{
-                      SingleActivator(
-                        LogicalKeyboardKey.keyV,
-                        control: true,
-                        shift: true,
-                      ): PasteTextIntent(SelectionChangedCause.keyboard),
-                    },
-                    // Own FocusNode stays on TextField only — sharing it with
-                    // this Focus wrapper reparents the node onto itself
-                    // ("Tried to make a child into a parent of itself").
-                    child: Focus(
-                      onKeyEvent: (node, event) {
-                        if (event is! KeyDownEvent) {
-                          return KeyEventResult.ignored;
-                        }
-                        final key = event.logicalKey;
-                        final isEnter = key == LogicalKeyboardKey.enter ||
-                            key == LogicalKeyboardKey.numpadEnter;
-                        if (isEnter &&
-                            !HardwareKeyboard.instance.isShiftPressed) {
-                          onSend();
-                          return KeyEventResult.handled;
-                        }
-                        return KeyEventResult.ignored;
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colorScheme.surface,
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    // Ctrl+Shift+V ("paste plain") — used by dictation tools
+                    // like Vibe Typer. Flutter only binds Ctrl+V / Shift+Insert.
+                    child: Shortcuts(
+                      shortcuts: const <ShortcutActivator, Intent>{
+                        SingleActivator(
+                          LogicalKeyboardKey.keyV,
+                          control: true,
+                          shift: true,
+                        ): PasteTextIntent(
+                          SelectionChangedCause.keyboard,
+                        ),
                       },
-                      child: TextField(
-                        controller: controller,
-                        focusNode: focusNode,
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.send,
-                        minLines: 1,
-                        maxLines: 8,
-                        decoration: const InputDecoration(
-                          hintText: 'Say something…',
-                          border: InputBorder.none,
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
+                      // Own FocusNode stays on TextField only — sharing it with
+                      // this Focus wrapper reparents the node onto itself
+                      // ("Tried to make a child into a parent of itself").
+                      child: Focus(
+                        onKeyEvent: (node, event) {
+                          if (event is! KeyDownEvent) {
+                            return KeyEventResult.ignored;
+                          }
+                          final key = event.logicalKey;
+                          final isEnter =
+                              key == LogicalKeyboardKey.enter ||
+                              key == LogicalKeyboardKey.numpadEnter;
+                          if (isEnter &&
+                              !HardwareKeyboard.instance.isShiftPressed) {
+                            onSend();
+                            return KeyEventResult.handled;
+                          }
+                          return KeyEventResult.ignored;
+                        },
+                        child: Consumer<MessageFontService>(
+                          builder: (context, fontService, _) {
+                            final decoration = const InputDecoration(
+                              hintText: 'Say something…',
+                              border: InputBorder.none,
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 12,
+                              ),
+                            );
+                            final style = TextStyle(
+                              fontSize: fontService.fontSize,
+                            );
+                            return MentionComposer(
+                              columnId: columnId,
+                              controller: controller,
+                              focusNode: focusNode,
+                              style: style,
+                              decoration: decoration,
+                            );
+                          },
                         ),
                       ),
                     ),
@@ -1177,10 +1325,7 @@ class _Composer extends StatelessWidget {
 
 /// Keeps the last warning copy visible while opacity animates out.
 class _CwdWarningBanner extends StatefulWidget {
-  const _CwdWarningBanner({
-    required this.botIds,
-    required this.phase,
-  });
+  const _CwdWarningBanner({required this.botIds, required this.phase});
 
   final List<String> botIds;
   final CwdWarningPhase phase;
@@ -1257,9 +1402,10 @@ class _CwdWarningBannerState extends State<_CwdWarningBanner> {
     return switch (phase) {
       CwdWarningPhase.advisory =>
         '$tags won\'t respond unless you set a cwd on this column.',
-      CwdWarningPhase.sent => plural
-          ? '$tags aren\'t going to respond.'
-          : '$tags isn\'t going to respond.',
+      CwdWarningPhase.sent =>
+        plural
+            ? '$tags aren\'t going to respond.'
+            : '$tags isn\'t going to respond.',
       CwdWarningPhase.none => '',
     };
   }

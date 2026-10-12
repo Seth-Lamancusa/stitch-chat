@@ -3,8 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:provider/provider.dart';
 
+import '../../core/settings/message_font_service.dart';
 import '../../data/models/message.dart';
+import 'inline_content_tokens.dart';
+import 'message_cloud_sync_menu.dart';
 
 /// A single message, free-floating (no background box), full width of its
 /// column. Darkens slightly on hover. Role only distinguishes function
@@ -21,6 +25,10 @@ import '../../data/models/message.dart';
 /// author label is bold only for the current user, plain for every other
 /// author (human or bot) — the same visual treatment regardless of role.
 class MessageCard extends StatelessWidget {
+  /// Widget tests: skip the infinite typing pulse (blocks test finalization).
+  @visibleForTesting
+  static bool debugDisableTypingPulse = false;
+
   final Message message;
   final String currentUserId;
   final VoidCallback? onReply;
@@ -28,12 +36,18 @@ class MessageCard extends StatelessWidget {
   /// Authors currently typing a reply under this message (ephemeral cues).
   final List<String> typingAuthors;
 
+  /// When non-empty (authenticated cloud), `@` / `#` tokens are styled inline.
+  final Set<String> highlightMentions;
+  final Set<String> highlightTags;
+
   const MessageCard({
     super.key,
     required this.message,
     required this.currentUserId,
     this.onReply,
     this.typingAuthors = const [],
+    this.highlightMentions = const {},
+    this.highlightTags = const {},
   });
 
   @override
@@ -43,6 +57,8 @@ class MessageCard extends StatelessWidget {
       currentUserId: currentUserId,
       onReply: onReply,
       typingAuthors: typingAuthors,
+      highlightMentions: highlightMentions,
+      highlightTags: highlightTags,
     );
   }
 }
@@ -52,12 +68,16 @@ class _MessageBubble extends StatefulWidget {
   final String currentUserId;
   final VoidCallback? onReply;
   final List<String> typingAuthors;
+  final Set<String> highlightMentions;
+  final Set<String> highlightTags;
 
   const _MessageBubble({
     required this.message,
     required this.currentUserId,
     this.onReply,
     this.typingAuthors = const [],
+    this.highlightMentions = const {},
+    this.highlightTags = const {},
   });
 
   @override
@@ -66,8 +86,9 @@ class _MessageBubble extends StatefulWidget {
 
 class _MessageBubbleState extends State<_MessageBubble> {
   final LayerLink _layerLink = LayerLink();
-  // One portal for both typing chrome and the hover action menu — same
-  // right-anchored slot over the card's bottom edge; content swaps on hover.
+  // Hover action menu only — must live on the root Overlay so it can be
+  // hit-tested across list-row bounds. Typing chrome is painted in this
+  // card's local Stack instead, so it stays under the column composer.
   final OverlayPortalController _chromeOverlay = OverlayPortalController();
 
   bool _hoveringCard = false;
@@ -100,10 +121,13 @@ class _MessageBubbleState extends State<_MessageBubble> {
 
   bool get _showActionMenu => _hoverHighlight || _menuLatched;
 
-  bool get _showTypingChrome =>
-      widget.typingAuthors.isNotEmpty && !_showActionMenu;
+  bool get _showSendingChrome =>
+      widget.message.isSending && !_showActionMenu;
 
-  bool get _showChrome => _showActionMenu || _showTypingChrome;
+  bool get _showTypingChrome =>
+      !_showSendingChrome &&
+      widget.typingAuthors.isNotEmpty &&
+      !_showActionMenu;
 
   void _cancelHide() => _hideTimer?.cancel();
 
@@ -112,7 +136,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
     _hideTimer = Timer(const Duration(milliseconds: 120), () {
       if (!_hoveringCard && !_hoveringMenu && !_moreMenuOpen) {
         _menuLatched = false;
-        _syncChromeOverlay();
+        _syncActionMenuOverlay();
         if (mounted) setState(() {});
       }
     });
@@ -126,7 +150,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
     } else {
       _scheduleHide();
     }
-    _syncChromeOverlay();
+    _syncActionMenuOverlay();
     setState(() {});
   }
 
@@ -134,7 +158,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
     _hoveringCard = true;
     _cancelHide();
     _menuLatched = true;
-    _syncChromeOverlay();
+    _syncActionMenuOverlay();
     setState(() {});
   }
 
@@ -157,8 +181,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
     setState(() {});
   }
 
-  void _syncChromeOverlay() {
-    if (_showChrome) {
+  void _syncActionMenuOverlay() {
+    if (_showActionMenu) {
       if (!_chromeOverlay.isShowing) _chromeOverlay.show();
     } else {
       if (_chromeOverlay.isShowing) _chromeOverlay.hide();
@@ -166,29 +190,44 @@ class _MessageBubbleState extends State<_MessageBubble> {
   }
 
   @override
-  void didUpdateWidget(covariant _MessageBubble oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.typingAuthors != widget.typingAuthors) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _syncChromeOverlay();
-      });
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.typingAuthors.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _syncChromeOverlay();
-      });
-    }
-  }
-
-  @override
   void dispose() {
     _hideTimer?.cancel();
     super.dispose();
+  }
+
+  Widget _buildMessageBody(BuildContext context, MessageFontService fontService) {
+    final content = widget.message.content.isEmpty ? '…' : widget.message.content;
+    final theme = Theme.of(context);
+    final baseStyle = theme.textTheme.bodyMedium?.copyWith(
+          fontSize: fontService.fontSize,
+        ) ??
+        TextStyle(fontSize: fontService.fontSize);
+
+    final highlight = widget.highlightMentions.isNotEmpty || widget.highlightTags.isNotEmpty;
+    if (highlight) {
+      return Text.rich(
+        InlineContentTokens.buildSpans(
+          text: content,
+          baseStyle: baseStyle,
+          validMentions: widget.highlightMentions,
+          validTags: widget.highlightTags,
+          mentionColor: const Color(0xFF3BA0D8),
+          tagColor: const Color(0xFFC4921A),
+        ),
+      );
+    }
+
+    return MarkdownBody(
+      data: content,
+      selectable: false,
+      fitContent: false,
+      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+        codeblockDecoration: BoxDecoration(
+          color: theme.cardTheme.color ?? theme.cardColor,
+          borderRadius: BorderRadius.circular(8),
+        ),
+      ),
+    );
   }
 
   String _typingLabel(List<String> authors) {
@@ -200,9 +239,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
     return '@${authors.first} +${authors.length - 1} are typing';
   }
 
-  /// Shared right-anchored overlay slot: right edge fixed to the card,
-  /// width grows leftward with content (typing copy or action buttons).
-  Widget _chromeFollower({required Widget child}) {
+  /// Shared right-anchored overlay slot for the hover action menu.
+  Widget _actionMenuFollower({required Widget child}) {
     // Overlay lays out non-Positioned children with tight full-viewport
     // constraints (same mechanism as StackFit.expand). CompositedTransformFollower
     // doesn't loosen those for its child, so without this Positioned wrapper
@@ -222,6 +260,28 @@ class _MessageBubbleState extends State<_MessageBubble> {
     );
   }
 
+  /// Same anchor as [_actionMenuFollower], but in this card's Stack so paint
+  /// order stays under the column composer (root Overlay would win).
+  Widget _localTypingChrome({
+    required String label,
+    required Color color,
+  }) {
+    return Positioned(
+      right: 8,
+      bottom: 20,
+      width: 0,
+      height: 0,
+      child: OverflowBox(
+        alignment: Alignment.topRight,
+        maxWidth: double.infinity,
+        maxHeight: double.infinity,
+        child: IgnorePointer(
+          child: _TypingCueChrome(label: label, color: color),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -233,101 +293,103 @@ class _MessageBubbleState extends State<_MessageBubble> {
       link: _layerLink,
       child: OverlayPortal(
         controller: _chromeOverlay,
-        // Rendered on the root Overlay rather than in this widget's own
-        // Stack: the message list gives each row an exact, non-overlapping
-        // slice of the screen, so chrome that merely overflows its own
-        // Stack still lands in a *different* list row's hit-test territory
-        // and can't be hovered there. Rendering on the Overlay sidesteps
-        // list-row boundaries entirely, and keeps rows tightly packed since
-        // nothing needs reserved space for the overflow.
+        // Action menu on the root Overlay: list rows own non-overlapping
+        // hit-test slices, so a local overflow menu can't be hovered from a
+        // neighboring row. Typing chrome stays in the local Stack below.
         overlayChildBuilder: (context) {
-          if (_showActionMenu) {
-            return _chromeFollower(
-              child: TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: 1),
-                duration: const Duration(milliseconds: 100),
-                builder: (context, opacity, child) =>
-                    Opacity(opacity: opacity, child: child),
-                child: MouseRegion(
-                  onEnter: (_) => _enterMenu(),
-                  onExit: (_) => _exitMenu(),
-                  child: _MessageActionMenu(
-                    content: message.content,
-                    messageId: message.id,
-                    onReply: widget.onReply,
-                    onMoreMenuOpenChanged: _setMoreMenuOpen,
-                  ),
+          if (!_showActionMenu) return const SizedBox.shrink();
+          return _actionMenuFollower(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 100),
+              builder: (context, opacity, child) =>
+                  Opacity(opacity: opacity, child: child),
+              child: MouseRegion(
+                onEnter: (_) => _enterMenu(),
+                onExit: (_) => _exitMenu(),
+                child: _MessageActionMenu(
+                  message: message,
+                  onReply: message.isSending ? null : widget.onReply,
+                  onMoreMenuOpenChanged: _setMoreMenuOpen,
                 ),
-              ),
-            );
-          }
-          // Cue clear/retarget can rebuild this child with [] before the
-          // post-frame hide runs — render nothing instead of calling .first.
-          if (typingAuthors.isEmpty) return const SizedBox.shrink();
-          return _chromeFollower(
-            child: IgnorePointer(
-              child: _TypingCueChrome(
-                label: _typingLabel(typingAuthors),
-                color: colorScheme.onSurfaceVariant,
               ),
             ),
           );
         },
-        child: MouseRegion(
-          onEnter: (_) => _enterCard(),
-          onExit: (_) => _exitCard(),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 100),
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            decoration: BoxDecoration(
-              color: hovering
-                  ? colorScheme.onSurface.withValues(alpha: 0.05)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (message.role == MessageRole.functionCall ||
-                    message.role == MessageRole.functionResult ||
-                    message.role == MessageRole.thinking)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
-                      switch (message.role) {
-                        MessageRole.functionCall => 'FUNCTION CALL',
-                        MessageRole.functionResult => 'FUNCTION RESULT',
-                        MessageRole.thinking => 'THINKING',
-                        _ => '',
-                      },
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.5,
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            MouseRegion(
+              onEnter: (_) => _enterCard(),
+              onExit: (_) => _exitCard(),
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 120),
+                opacity: message.isSending ? 0.72 : 1,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 100),
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: hovering
+                        ? colorScheme.onSurface.withValues(alpha: 0.05)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                SelectionArea(
-                  child: MarkdownBody(
-                    data: message.content.isEmpty ? '…' : message.content,
-                    selectable: false,
-                    fitContent: false,
-                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                        .copyWith(
-                      codeblockDecoration: BoxDecoration(
-                        color: Theme.of(context).cardTheme.color ??
-                            Theme.of(context).cardColor,
-                        borderRadius: BorderRadius.circular(8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (message.role == MessageRole.functionCall ||
+                          message.role == MessageRole.functionResult ||
+                          message.role == MessageRole.thinking)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(
+                            switch (message.role) {
+                              MessageRole.functionCall => 'FUNCTION CALL',
+                              MessageRole.functionResult => 'FUNCTION RESULT',
+                              MessageRole.thinking => 'THINKING',
+                              _ => '',
+                            },
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 0.5,
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      SelectionArea(
+                        child: Consumer<MessageFontService>(
+                          builder: (context, fontService, _) {
+                            final parentScaler = MediaQuery.textScalerOf(context);
+                            return MediaQuery(
+                              data: MediaQuery.of(context).copyWith(
+                                textScaler: TextScaler.linear(
+                                  parentScaler.scale(fontService.textScale),
+                                ),
+                              ),
+                              child: _buildMessageBody(context, fontService),
+                            );
+                          },
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
-              ],
+              ),
             ),
-          ),
+            if (_showSendingChrome)
+              _localTypingChrome(
+                label: 'Sending…',
+                color: colorScheme.onSurfaceVariant,
+              ),
+            if (_showTypingChrome)
+              _localTypingChrome(
+                label: _typingLabel(typingAuthors),
+                color: colorScheme.onSurfaceVariant,
+              ),
+          ],
         ),
       ),
     );
@@ -402,7 +464,12 @@ class _TypingCueChromeState extends State<_TypingCueChrome>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
+    );
+    if (MessageCard.debugDisableTypingPulse) {
+      _controller.value = 1.0;
+    } else {
+      _controller.repeat(reverse: true);
+    }
     _opacity = Tween<double>(begin: 0.55, end: 1.0).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
     );
@@ -438,7 +505,7 @@ class _TypingCueChromeState extends State<_TypingCueChrome>
 
 /// Surface chip shared by the hover action menu and typing indicator.
 ///
-/// Right-anchored by the overlay follower: intrinsic width grows leftward
+/// Right-anchored at the card's bottom edge; intrinsic width grows leftward
 /// as content widens. [bordered] is true for the interactive menu, false
 /// for typing chrome (same fill, no outline).
 class _MessageChromeShell extends StatelessWidget {
@@ -454,7 +521,10 @@ class _MessageChromeShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return Material(
-      elevation: bordered ? 2 : 1,
+      // Typing chrome (unbordered) stays at 0 so it can't composite above
+      // the column composer via elevation sorting; the action menu is on
+      // the root Overlay and keeps a light lift.
+      elevation: bordered ? 2 : 0,
       borderRadius: BorderRadius.circular(6),
       color: colorScheme.surface,
       child: Container(
@@ -477,14 +547,12 @@ class _MessageChromeShell extends StatelessWidget {
 /// and right-aligned.
 class _MessageActionMenu extends StatelessWidget {
   const _MessageActionMenu({
-    required this.content,
-    required this.messageId,
+    required this.message,
     this.onReply,
     required this.onMoreMenuOpenChanged,
   });
 
-  final String content;
-  final String messageId;
+  final Message message;
   final VoidCallback? onReply;
   final ValueChanged<bool> onMoreMenuOpenChanged;
 
@@ -495,9 +563,14 @@ class _MessageActionMenu extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _MessageActionButton(icon: Icons.reply, tooltip: 'Reply', onPressed: onReply),
-          _CopyButton(content: content),
-          _MoreActionButton(messageId: messageId, onOpenChanged: onMoreMenuOpenChanged),
+          if (onReply != null)
+            _MessageActionButton(
+              icon: Icons.reply,
+              tooltip: 'Reply',
+              onPressed: onReply,
+            ),
+          _CopyButton(content: message.content),
+          _MoreActionButton(message: message, onOpenChanged: onMoreMenuOpenChanged),
         ],
       ),
     );
@@ -612,9 +685,9 @@ class _CopyButtonState extends State<_CopyButton> {
 
 /// Contextual "more actions" menu.
 class _MoreActionButton extends StatefulWidget {
-  const _MoreActionButton({required this.messageId, required this.onOpenChanged});
+  const _MoreActionButton({required this.message, required this.onOpenChanged});
 
-  final String messageId;
+  final Message message;
   final ValueChanged<bool> onOpenChanged;
 
   @override
@@ -645,6 +718,7 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
       // the copy itself happens here (before the pop) rather than after
       // showMenu resolves — the "Copied!" feedback below plays out on the
       // trigger button instead, once the menu is already closed.
+      final syncItem = MessageCloudSyncMenu.maybeItem(context, widget.message);
       final selected = await showMenu<String>(
         context: context,
         position: position,
@@ -653,9 +727,10 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
           side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
         ),
         items: [
+          if (syncItem != null) syncItem,
           PopupMenuItem(
             value: _copyIdValue,
-            onTap: () => Clipboard.setData(ClipboardData(text: widget.messageId)),
+            onTap: () => Clipboard.setData(ClipboardData(text: widget.message.id)),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -664,7 +739,11 @@ class _MoreActionButtonState extends State<_MoreActionButton> {
                 // Fixed width + ellipsis so a long id can't stretch the menu.
                 SizedBox(
                   width: 140,
-                  child: Text('ID: ${widget.messageId}', overflow: TextOverflow.ellipsis, maxLines: 1),
+                  child: Text(
+                    'ID: ${widget.message.id}',
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
                 ),
               ],
             ),

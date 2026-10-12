@@ -5,16 +5,25 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/logging/stitch_log.dart';
 import '../../core/notifications/notification_service.dart';
+import '../../data/models/cloud_sync_status.dart';
 import '../../data/models/message.dart';
+import '../../data/models/message_tag.dart';
+import '../../data/models/participant_profile.dart';
+import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/column_repository.dart';
 import '../../data/repositories/message_repository.dart';
 import '../../data/services/bot_bridge_service.dart';
+import '../../data/services/cloud_message_api.dart';
+import '../../data/services/cloud_user_directory.dart';
 import '../../data/services/local_identity_service.dart';
+import '../../domain/cloud_edge_reconciler.dart';
+import '../../domain/cloud_send_guard.dart';
 import '../../data/services/mock_typing_cue.dart';
 import '../../data/services/typing_cue_store.dart';
 import '../../domain/bot_registry.dart';
 import '../../domain/branch_path_service.dart';
 import '../../domain/context_chain.dart';
+import '../../domain/draft_inline_tokens.dart';
 import '../core/adaptive_marker.dart';
 import 'column_ui_state.dart';
 import 'columns_display_mode.dart';
@@ -45,9 +54,15 @@ class ColumnsViewModel extends ChangeNotifier {
     BotBridgeService? botBridge,
     NotificationService? notifications,
     TypingCueStore? typingCues,
+    AuthRepository? auth,
+    CloudMessageApi? cloudMessages,
+    CloudUserDirectory? cloudUsers,
     this.mockTypingCues = false,
   })  : _botBridge = botBridge,
         _notifications = notifications,
+        _auth = auth,
+        _cloudMessages = cloudMessages,
+        _cloudUsers = cloudUsers,
         typingCues = typingCues ?? TypingCueStore() {
     final bridge = _botBridge;
     if (bridge != null) {
@@ -62,6 +77,9 @@ class ColumnsViewModel extends ChangeNotifier {
   final LocalIdentityService _identity;
   final BotBridgeService? _botBridge;
   final NotificationService? _notifications;
+  final AuthRepository? _auth;
+  final CloudMessageApi? _cloudMessages;
+  final CloudUserDirectory? _cloudUsers;
   final TypingCueStore typingCues;
 
   /// When true, honor `[[mockTyping:…]]` markers on message content as
@@ -75,7 +93,12 @@ class ColumnsViewModel extends ChangeNotifier {
   final List<ColumnUiState> _states = [];
   final Map<String, String?> _anchors = {};
   final Map<String, String> _composerDrafts = {};
+  final Map<String, DraftReplySettings> _draftSettings = {};
   final Map<String, Timer> _cwdWarningFadeTimers = {};
+
+  /// In-flight optimistic sends keyed by local message id. Survives [_refresh]
+  /// until local persist (+ cloud notify when required) settles or rolls back.
+  final Map<String, _OutboundSend> _outboundSends = {};
 
   List<ColumnUiState> get columns => List.unmodifiable(_states);
 
@@ -125,6 +148,38 @@ class ColumnsViewModel extends ChangeNotifier {
   /// login; otherwise the device-local uid until the user signs in once.
   String get currentUserId => _identity.currentUserId;
 
+  bool get cloudFeaturesEnabled =>
+      _auth?.state.isAuthenticated == true &&
+      _cloudMessages != null &&
+      _cloudUsers != null;
+
+  BotRegistry get botRegistry => _botBridge?.registry ?? const BotRegistry.empty();
+
+  Future<ParticipantProfile?> participantProfile(String? uid) async {
+    if (uid == null || uid.isEmpty) return null;
+    return _messages.getParticipantProfile(uid);
+  }
+
+  /// Column-level cloud sync aggregate for the reply-connected tree.
+  Future<ColumnCloudSyncState> cloudSyncStateFor(String columnId) async {
+    final anchor = _anchors[columnId];
+    if (anchor == null || !cloudFeaturesEnabled) {
+      return ColumnCloudSyncState.idle;
+    }
+    final treeIds = await _branchPathService.replyTreeIds(anchor);
+    var pending = false;
+    var failed = false;
+    for (final id in treeIds) {
+      final msg = await _messages.getMessage(id);
+      if (msg == null) continue;
+      if (msg.syncStatus == CloudSyncStatus.pending) pending = true;
+      if (msg.syncStatus == CloudSyncStatus.failed) failed = true;
+    }
+    if (failed) return ColumnCloudSyncState.failed;
+    if (pending) return ColumnCloudSyncState.pending;
+    return ColumnCloudSyncState.idle;
+  }
+
   String? anchorOf(String columnId) => _anchors[columnId];
 
   Future<void> initialize() async {
@@ -148,11 +203,97 @@ class ColumnsViewModel extends ChangeNotifier {
   /// Reloads every column's visible branch from storage — used after
   /// identity stamps change (local→cloud author promotion) so "You" labels
   /// and in-memory rows pick up the rewritten [Message.authorId]s.
-  Future<void> reloadAll() async {
+  ///
+  /// When signed in, also reconciles reply/stitch edges for every
+  /// already-synced message on each column's visible branch (toolbar Refresh
+  /// / post-auth catch-up). Bottom marker shows [ColumnUiState.bottomLoading]
+  /// while that cloud pull runs.
+  ///
+  /// [reason] is a hop-log label (`auth`, `toolbar`, …).
+  Future<void> reloadAll({String reason = 'reload'}) async {
+    StitchLog.hop(
+      'dart.cloud',
+      'reloadAll start reason=$reason columns=${_states.length} '
+          'cloud=${cloudFeaturesEnabled}',
+    );
     for (final state in _states) {
-      await _refresh(state.id);
+      await _reloadColumn(state.id, reason: reason);
     }
+    StitchLog.hop('dart.cloud', 'reloadAll done reason=$reason');
     notifyListeners();
+  }
+
+  Future<void> _reloadColumn(
+    String columnId, {
+    required String reason,
+  }) async {
+    final state = _stateFor(columnId);
+    final api = _cloudMessages;
+    final anchorId = _anchors[columnId];
+    final canReconcile =
+        cloudFeaturesEnabled && api != null && anchorId != null;
+
+    if (!cloudFeaturesEnabled) {
+      StitchLog.hop(
+        'dart.cloud',
+        'reload column=$columnId reason=$reason skip=not-authenticated',
+      );
+    } else if (anchorId == null) {
+      StitchLog.hop(
+        'dart.cloud',
+        'reload column=$columnId reason=$reason skip=no-anchor',
+      );
+    } else if (canReconcile) {
+      final branch =
+          await _branchPathService.getFullVisibleBranch(columnId, anchorId);
+      final syncedCount = branch
+          .where(
+            (m) =>
+                m.syncStatus == CloudSyncStatus.synced &&
+                m.cloudMessageId != null &&
+                m.cloudMessageId!.isNotEmpty,
+          )
+          .length;
+      StitchLog.hop(
+        'dart.cloud',
+        'reload column=$columnId reason=$reason branch=${branch.length} '
+            'synced=$syncedCount',
+      );
+      if (syncedCount > 0) {
+        state.bottomLoading = true;
+        state.bottomError = null;
+        notifyListeners();
+        try {
+          final reconciler = CloudEdgeReconciler(
+            messages: _messages,
+            fetchMessage: api.fetchMessage,
+          );
+          final changed = await reconciler.reconcileBranch(
+            branch,
+            columnId: columnId,
+          );
+          StitchLog.hop(
+            'dart.cloud',
+            'reload column=$columnId reason=$reason reconcileChanged=$changed',
+          );
+        } catch (e, st) {
+          StitchLog.error(
+            'cloud edge reconcile failed column=$columnId reason=$reason: $e',
+            tag: 'cloud',
+            error: e,
+            stackTrace: st,
+          );
+          _notifications?.show(
+            e.toString(),
+            title: 'Cloud refresh failed',
+          );
+        } finally {
+          state.bottomLoading = false;
+        }
+      }
+    }
+
+    await _refresh(columnId);
   }
 
   Future<void> addColumn({String? anchorMessageId, double? width}) async {
@@ -216,11 +357,142 @@ class ColumnsViewModel extends ChangeNotifier {
     await refreshCwdWarning(id);
   }
 
-  /// Called as the composer draft changes so the cwd advisory can track
-  /// prospective local-bot recipients (mentions + inherited).
+  /// Per-column draft tags/recipients (list SSoT for compose + send).
+  DraftReplySettings draftSettingsFor(String columnId) =>
+      _draftSettings.putIfAbsent(columnId, DraftReplySettings.new);
+
+  /// Highlight sets for the composer overlay (list-authoritative).
+  Set<String> draftHighlightTags(String columnId) =>
+      draftSettingsFor(columnId).tagSet;
+
+  Set<String> draftHighlightMentions(String columnId) =>
+      draftSettingsFor(columnId).mentionTagSet;
+
+  /// Called as the composer draft changes: stage/reconcile tag & mention
+  /// lists, then refresh the cwd advisory from prospective local-bot
+  /// recipients (draft list + inherited).
   Future<void> onComposerDraftChanged(String columnId, String draft) {
     _composerDrafts[columnId] = draft;
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    applyDraftContentChange(
+      draftSettingsFor(columnId),
+      draft,
+      botIdForTag: registry.botIdForTag,
+    );
+    notifyListeners();
     return refreshCwdWarning(columnId);
+  }
+
+  /// Autocomplete pick: insert already happened in the composer; stage the
+  /// recipient into the draft list (cloud or local).
+  void ensureComposerMention({
+    required String columnId,
+    required String recipientId,
+    required RecipientKind kind,
+    String? userTag,
+    bool isCloudBot = false,
+    ParticipantProfile? profile,
+  }) {
+    if (profile != null) {
+      unawaited(_messages.upsertParticipantProfile(profile));
+    }
+    ensureDraftRecipient(
+      draftSettingsFor(columnId),
+      DraftRecipient(
+        recipientId: recipientId,
+        kind: kind,
+        userTag: userTag ?? profile?.userTag,
+        isCloudBot: isCloudBot || (profile?.isBot ?? false),
+      ),
+    );
+    notifyListeners();
+    unawaited(refreshCwdWarning(columnId));
+  }
+
+  /// Drop a staged draft recipient. Content is not rewritten (same as
+  /// stitch-frontend ReplyBox / [DraftReplySettings] contract).
+  void removeDraftRecipient(String columnId, String recipientId) {
+    final draft = draftSettingsFor(columnId);
+    final index = draft.recipients.indexWhere(
+      (r) => r.recipientId == recipientId,
+    );
+    if (index < 0) return;
+    final removed = draft.recipients.removeAt(index);
+    final tag = removed.normalizedTag;
+    if (tag != null) {
+      draft.inlineTrackedRecipientTags.remove(tag);
+    }
+    noteReplyParentRecipientRemoved(draft, recipientId);
+    notifyListeners();
+    unawaited(refreshCwdWarning(columnId));
+  }
+
+  /// Effective reply parent for [columnId]: explicit target, else column tip.
+  String? _effectiveReplyParentId(String columnId) {
+    final state = _stateFor(columnId);
+    return state.replyingToMessageId ??
+        (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+  }
+
+  /// Reply-parent id to keep visually fixed across a mid-thread fork send, or
+  /// `null` when send will not relocate the scroll center onto a junction
+  /// (tip append / empty column). Mirrors [navigateOutgoing]'s pin target so
+  /// the UI can wrap [sendMessage] in the same viewport-Y correction.
+  String? scrollPinParentForSend(String columnId) {
+    final parentId = _effectiveReplyParentId(columnId);
+    if (parentId == null) return null;
+    final state = _stateFor(columnId);
+    final parentIndex =
+        state.rows.indexWhere((row) => row.message.id == parentId);
+    if (parentIndex < 0 || parentIndex >= state.rows.length - 1) {
+      return null;
+    }
+    return parentId;
+  }
+
+  /// Fold the reply-parent author into [DraftReplySettings.recipients] so the
+  /// Recipients pill shows them before send (same list send reads).
+  Future<void> _syncReplyParentDraftRecipient(String columnId) async {
+    final draft = draftSettingsFor(columnId);
+    final parentId = _effectiveReplyParentId(columnId);
+
+    Message? parentMessage;
+    if (parentId != null) {
+      for (final row in _stateFor(columnId).rows) {
+        if (row.message.id == parentId) {
+          parentMessage = row.message;
+          break;
+        }
+      }
+      parentMessage ??= await _messages.getMessage(parentId);
+    }
+
+    final authorId = parentMessage?.authorId;
+    var kind = RecipientKind.cloudUser;
+    String? userTag;
+    var isCloudBot = false;
+    if (parentMessage != null &&
+        authorId != null &&
+        authorId != _identity.currentUserId) {
+      if (parentMessage.role == MessageRole.localBot) {
+        kind = RecipientKind.localBot;
+        userTag = authorId;
+      } else {
+        final profile = await _messages.getParticipantProfile(authorId);
+        userTag = profile?.userTag;
+        isCloudBot = profile?.isBot ?? false;
+      }
+    }
+
+    syncReplyParentAuthor(
+      draft,
+      parentMessageId: parentId,
+      authorId: authorId,
+      currentUserId: _identity.currentUserId,
+      kind: kind,
+      userTag: userTag,
+      isCloudBot: isCloudBot,
+    );
   }
 
   /// Recomputes the advisory banner above the reply box. No-ops while a
@@ -372,7 +644,11 @@ class ColumnsViewModel extends ChangeNotifier {
     }
     _stateFor(columnId).replyingToMessageId = messageId;
     notifyListeners();
-    unawaited(refreshCwdWarning(columnId));
+    unawaited(() async {
+      await _syncReplyParentDraftRecipient(columnId);
+      notifyListeners();
+      await refreshCwdWarning(columnId);
+    }());
   }
 
   /// Sends [content] as a reply under [columnId]'s pending reply target
@@ -388,19 +664,45 @@ class ColumnsViewModel extends ChangeNotifier {
   /// has no descendants yet.
   ///
   /// Scroll-center anchor: set on the first message in an empty column, and
-  /// moved onto the new message when the reply parent already has a child on
-  /// the visible branch (mid-thread fork) so `_refresh` walks the new fork
-  /// instead of the old tip. Tip appends leave the center where it was.
-  Future<void> sendMessage(String columnId, String content) async {
-    if (content.trim().isEmpty) return;
+  /// moved onto the reply parent when that parent already has a child on the
+  /// visible branch (mid-thread fork) — same junction pin as
+  /// [navigateOutgoing], so `_refresh` walks the new fork via the just-set
+  /// branch pointer and the UI can keep the parent's viewport Y stable.
+  /// Tip appends leave the center where it was.
+  /// Persists a user message and optionally notifies cloud / dispatches bots.
+  ///
+  /// Optimistically appends the trigger to the column immediately
+  /// ([Message.isSending]), then persists locally and notifies cloud. Returns
+  /// `true` when the local row was kept (cloud notify succeeded or was not
+  /// required). Returns `false` when send was blocked or rolled back — the
+  /// composer draft lists are left intact so the UI can restore the field.
+  Future<bool> sendMessage(String columnId, String content) async {
+    if (content.trim().isEmpty) return false;
     final state = _stateFor(columnId);
-    final parentId = state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+    final parentId = _effectiveReplyParentId(columnId);
     final visibleBranch = state.rows.map((row) => row.message).toList(growable: false);
     final contextMessages = contextThroughReplyTarget(
       visibleBranch,
       replyTargetId: parentId,
     );
-    final mentions = (_botBridge?.registry ?? const BotRegistry.empty()).parseMentions(content);
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    final draft = draftSettingsFor(columnId);
+    // Capture terminal `#tag` / committed local `@bot` before send.
+    applyDraftContentChange(
+      draft,
+      content,
+      botIdForTag: registry.botIdForTag,
+      allowTerminalBoundary: true,
+    );
+    // Stage reply-parent author from the in-memory row (no await) so the
+    // snapshot includes them before the composer clear races the event loop.
+    _stageReplyParentAuthorFromRows(columnId);
+    // Snapshot list SSoT before any await — clearing the composer field must
+    // not race with reconcileInlineRecipientsWithContent('') and drop cloud
+    // @mentions that are only staged via autocomplete (not re-derivable from
+    // text alone).
+    final tagNames = List<String>.from(draft.tags);
+    final draftRecipients = List<DraftRecipient>.from(draft.recipients);
 
     // Parent already shows a descendant on this column — sending under it
     // forks away from that child; we must retarget the pointer *and* walk
@@ -410,10 +712,12 @@ class ColumnsViewModel extends ChangeNotifier {
     final forksVisibleChild =
         parentIndex >= 0 && parentIndex < state.rows.length - 1;
 
-    StitchLog.hop(
-      'dart.column',
-      'send column=$columnId reply_to=$parentId visible=${visibleBranch.length} context=${contextMessages.length} mentions=${mentions.map((m) => m.botId).join(",")}',
-    );
+    Message? parentMessage;
+    ParticipantProfile? parentAuthorProfile;
+    if (parentId != null && parentIndex >= 0) {
+      parentMessage = state.rows[parentIndex].message;
+      parentAuthorProfile = state.rows[parentIndex].authorProfile;
+    }
 
     final newMessage = Message(
       id: _uuid.v4(),
@@ -421,57 +725,227 @@ class ColumnsViewModel extends ChangeNotifier {
       authorId: _identity.currentUserId,
       content: content,
       createdAt: DateTime.now().toUtc(),
+      isSending: true,
     );
-    await _messages.saveMessage(newMessage);
+    final highlightMentions = <String>{
+      for (final d in draftRecipients)
+        if (d.userTag != null && d.userTag!.trim().isNotEmpty) d.userTag!.trim(),
+    };
+    final highlightTags = tagNames.toSet();
+    _beginOutboundSend(
+      _OutboundSend(
+        columnId: columnId,
+        parentId: parentId,
+        message: newMessage,
+        highlightMentions: highlightMentions,
+        highlightTags: highlightTags,
+      ),
+    );
+    notifyListeners();
+
+    parentMessage ??=
+        parentId == null ? null : await _messages.getMessage(parentId);
+
+    // Authoritative recipient map: inherited parent addressees, then draft
+    // list overlays (autocomplete / reply-parent author / local-bot mentions).
+    // Reply-parent author is staged onto the draft before send — not injected here.
+    final recipientById = <String, RecipientRef>{};
+    if (parentId != null) {
+      for (final recipient in await _messages.getRecipients(parentId)) {
+        if (recipient.recipientId == _identity.currentUserId) continue;
+        recipientById[recipient.recipientId] = RecipientRef(
+          recipientId: recipient.recipientId,
+          kind: recipient.kind,
+          isCloudBot: recipient.isCloudBot,
+          isPublic: recipient.isPublic,
+          notify: recipient.notify,
+          addedBy: _identity.currentUserId,
+        );
+      }
+    }
+
+    for (final d in draftRecipients) {
+      if (d.kind == RecipientKind.cloudUser) {
+        var profile = await _messages.getParticipantProfile(d.recipientId);
+        if (profile == null && d.userTag != null) {
+          final directory = _cloudUsers;
+          if (directory != null) {
+            profile = await directory.findByUserTag(d.userTag!);
+          }
+          // Cache tag even when directory miss — posted @highlights resolve
+          // from participant profiles, not from DraftRecipient.
+          await _messages.upsertParticipantProfile(
+            profile ??
+                ParticipantProfile(
+                  uid: d.recipientId,
+                  userTag: d.userTag,
+                  isBot: d.isCloudBot,
+                ),
+          );
+        }
+      }
+      recipientById[d.recipientId] = RecipientRef(
+        recipientId: d.recipientId,
+        kind: d.kind,
+        isCloudBot: d.isCloudBot,
+        isPublic: d.isPublic,
+        notify: d.notify,
+        addedBy: _identity.currentUserId,
+      );
+    }
+
+    final recipientRefs = recipientById.values.toList(growable: false);
+
+    StitchLog.hop(
+      'dart.column',
+      'send column=$columnId reply_to=$parentId visible=${visibleBranch.length} '
+          'context=${contextMessages.length} '
+          'recipients=${recipientRefs.map((r) => r.recipientId).join(",")} '
+          'tags=${tagNames.join(",")}',
+    );
+
+    final addressesCloudBot = CloudSendGuard.addressesCloudBot(recipientRefs);
+    final guardError = CloudSendGuard.blockReasonForCloudBotReply(
+      parentLocalId: parentId,
+      parentMessage: parentMessage,
+      addressesCloudBot: addressesCloudBot,
+    );
+    if (guardError != null) {
+      _cancelOutboundSend(newMessage.id);
+      _notifications?.showError(guardError);
+      notifyListeners();
+      return false;
+    }
+
+    final cloudNotify = CloudSendGuard.cloudNotifyRecipients(recipientRefs);
+    final needsCloudPost = cloudFeaturesEnabled && cloudNotify.isNotEmpty;
+    if (needsCloudPost && _auth!.state.cloudUserId == null) {
+      _cancelOutboundSend(newMessage.id);
+      _notifications?.showError('Sign in to notify Stitch cloud recipients.');
+      notifyListeners();
+      return false;
+    }
+
+    String? parentCloudId;
+    if (needsCloudPost && parentId != null) {
+      parentCloudId = parentMessage?.cloudMessageId;
+      if (parentCloudId == null || parentCloudId.isEmpty) {
+        _cancelOutboundSend(newMessage.id);
+        _notifications?.showError(
+          'Reply parent is not synced to Stitch cloud.',
+        );
+        notifyListeners();
+        return false;
+      }
+    }
+
+    final persistMessage = newMessage.copyWith(
+      isSending: false,
+      syncStatus: needsCloudPost ? CloudSyncStatus.pending : CloudSyncStatus.none,
+    );
+    await _messages.saveMessage(persistMessage);
 
     if (parentId != null) {
       await _messages.addReplyEdge(parentId, newMessage.id);
       await _columns.setBranchPointer(columnId, parentId, newMessage.id);
     }
 
-    // A reply inherits its parent's addressees (author + parent's own
-    // recipients) so the whole thread stays addressed without requiring an
-    // explicit @mention for everyone already in it — mirrors
-    // stitch-frontend's syncReplySettings, minus its notify/ancestor-cascade
-    // semantics, which this app doesn't model.
-    final inherited = <String, RecipientKind>{};
-    if (parentId != null) {
-      Message? parentMessage;
-      for (final row in state.rows) {
-        if (row.message.id == parentId) {
-          parentMessage = row.message;
-          break;
-        }
-      }
-      parentMessage ??= await _messages.getMessage(parentId);
+    final now = DateTime.now().toUtc();
+    await _messages.setMessageTags(
+      newMessage.id,
+      [
+        for (final name in tagNames)
+          MessageTag(
+            name: name,
+            createdAt: now,
+            addedBy: _identity.currentUserId,
+          ),
+      ],
+    );
 
-      final parentAuthorId = parentMessage?.authorId;
-      if (parentAuthorId != null && parentAuthorId != _identity.currentUserId) {
-        inherited[parentAuthorId] =
-            parentMessage!.role == MessageRole.localBot ? RecipientKind.localBot : RecipientKind.cloudUser;
-      }
-      for (final recipient in await _messages.getRecipients(parentId)) {
-        if (recipient.recipientId != _identity.currentUserId) {
-          inherited[recipient.recipientId] = recipient.kind;
-        }
-      }
-      for (final entry in inherited.entries) {
-        await _messages.addRecipientEdge(newMessage.id, entry.key, entry.value);
-      }
-    }
-
-    for (final mention in mentions) {
+    for (final ref in recipientRefs) {
       await _messages.addRecipientEdge(
         newMessage.id,
-        mention.botId,
-        RecipientKind.localBot,
+        ref.recipientId,
+        ref.kind,
+        isCloudBot: ref.isCloudBot,
+        isPublic: ref.isPublic,
+        notify: ref.notify,
+        addedBy: ref.addedBy,
       );
     }
 
+    if (needsCloudPost) {
+      final cloudInputs = [
+        for (final r in cloudNotify)
+          CloudRecipientInput(
+            uid: r.recipientId,
+            notify: r.notify,
+            isPublic: r.isPublic,
+          ),
+      ];
+      // Visible-branch prefix only (not including trigger) — cloud bots get
+      // the trigger in content.messages and ancestors in content.context.
+      final profileByAuthor = <String, ParticipantProfile?>{};
+      for (final m in contextMessages) {
+        final authorId = m.authorId;
+        if (authorId == null || authorId.isEmpty) continue;
+        if (profileByAuthor.containsKey(authorId)) continue;
+        profileByAuthor[authorId] =
+            await _messages.getParticipantProfile(authorId);
+      }
+      // Prefer the profile already loaded for the reply parent when present.
+      final parentAuthorId = parentMessage?.authorId;
+      if (parentAuthorId != null &&
+          parentAuthorId.isNotEmpty &&
+          !profileByAuthor.containsKey(parentAuthorId)) {
+        profileByAuthor[parentAuthorId] = parentAuthorProfile ??
+            await _messages.getParticipantProfile(parentAuthorId);
+      }
+      final cloudContext = messagesToCloudContext(
+        contextMessages,
+        profileFor: (authorId) => profileByAuthor[authorId],
+      );
+      final result = await _cloudMessages!.createMessage(
+        content: content,
+        parentCloudMessageId: parentCloudId,
+        cloudRecipients: cloudInputs,
+        tags: tagNames,
+        context: cloudContext,
+      );
+      if (!result.success) {
+        _outboundSends.remove(newMessage.id);
+        await _messages.deleteMessage(newMessage.id);
+        _notifications?.showError(
+          result.error ?? 'Cloud notification failed.',
+        );
+        await _refresh(columnId);
+        notifyListeners();
+        return false;
+      }
+      await _messages.updateCloudSync(
+        localMessageId: newMessage.id,
+        syncStatus: CloudSyncStatus.synced,
+        cloudMessageId: result.cloudMessageId,
+        syncError: null,
+      );
+    }
+
+    _outboundSends.remove(newMessage.id);
+    draft.clear();
+    _composerDrafts[columnId] = '';
+
     state.replyingToMessageId = null;
-    if (_anchors[columnId] == null || forksVisibleChild) {
+    if (_anchors[columnId] == null) {
       await _columns.updateColumnAnchor(columnId, newMessage.id);
       await _refresh(columnId, anchorMessageId: newMessage.id);
+    } else if (forksVisibleChild) {
+      // Anchor on the junction parent (not the new tip), matching
+      // [navigateOutgoing]: the pointer at [parentId] already points at the
+      // new child, so walking from here derives the new fork without moving
+      // the center onto a row that was not yet on screen.
+      await _columns.updateColumnAnchor(columnId, parentId!);
+      await _refresh(columnId, anchorMessageId: parentId);
     } else {
       await _refresh(columnId);
     }
@@ -481,19 +955,18 @@ class ColumnsViewModel extends ChangeNotifier {
     // Dispatch is driven by the message's authoritative recipient set, not
     // by re-parsing the text — same principle as stitch-frontend (recipients
     // are the source of truth for who gets notified, not the literal
-    // @mention string). This picks up bots inherited as recipients (e.g. the
-    // parent message's bot author) even when this reply doesn't retype
-    // "@bot".
+    // @mention string). This picks up bots staged on the draft (including the
+    // reply-parent author) and inherited parent recipients even without a
+    // retyped "@bot".
     final botRecipientIds = <String>{
-      ...mentions.map((m) => m.botId),
-      for (final entry in inherited.entries)
-        if (entry.value == RecipientKind.localBot) entry.key,
+      for (final ref in recipientRefs)
+        if (ref.kind == RecipientKind.localBot) ref.recipientId,
     };
 
     final bridge = _botBridge;
     if (bridge == null || botRecipientIds.isEmpty) {
       StitchLog.hop('dart.column', 'no bot dispatch bridge=${bridge != null} recipients=${botRecipientIds.length}');
-      return;
+      return true;
     }
 
     final contextWindow = contextWindowIncludingTrigger(contextMessages, newMessage);
@@ -507,7 +980,6 @@ class ColumnsViewModel extends ChangeNotifier {
     if (skippedForCwd.isNotEmpty) {
       _showCwdSentWarning(state, skippedForCwd);
     } else {
-      _composerDrafts[columnId] = '';
       unawaited(refreshCwdWarning(columnId));
     }
 
@@ -546,33 +1018,22 @@ class ColumnsViewModel extends ChangeNotifier {
         _notifications?.showError('Bot $botId failed: $e');
       }
     }
+    return true;
   }
 
   Future<List<String>> _botsNeedingCwd(String columnId, String draft) async {
     final registry = _botBridge?.registry ?? const BotRegistry.empty();
-    final state = _stateFor(columnId);
-    final parentId =
-        state.replyingToMessageId ?? (state.rows.isNotEmpty ? state.rows.last.message.id : null);
+    final parentId = _effectiveReplyParentId(columnId);
 
+    // Draft list is SSoT for the reply-parent author (staged via
+    // [_syncReplyParentDraftRecipient]); also include inherited parent
+    // local-bot edges that are not yet on the draft pill.
     final botIds = <String>{
-      ...registry.parseMentions(draft).map((m) => m.botId),
+      for (final r in draftSettingsFor(columnId).recipients)
+        if (r.kind == RecipientKind.localBot) r.recipientId,
     };
 
     if (parentId != null) {
-      Message? parentMessage;
-      for (final row in state.rows) {
-        if (row.message.id == parentId) {
-          parentMessage = row.message;
-          break;
-        }
-      }
-      parentMessage ??= await _messages.getMessage(parentId);
-      final parentAuthorId = parentMessage?.authorId;
-      if (parentAuthorId != null &&
-          parentAuthorId != _identity.currentUserId &&
-          parentMessage?.role == MessageRole.localBot) {
-        botIds.add(parentAuthorId);
-      }
       for (final recipient in await _messages.getRecipients(parentId)) {
         if (recipient.kind == RecipientKind.localBot &&
             recipient.recipientId != _identity.currentUserId) {
@@ -642,7 +1103,138 @@ class ColumnsViewModel extends ChangeNotifier {
     );
   }
 
-  /// Shared ingest for local-bot parts and (later) cloud WS arrivals.
+  /// Ingest a Stitch cloud WS/API message into the best-matching column.
+  Future<void> handleCloudWireMessage(Map<String, dynamic> json) async {
+    final cloudId = json['id'] as String?;
+    if (cloudId == null || cloudId.isEmpty) return;
+
+    if (await _messages.getMessage(cloudId) != null) return;
+    if (await _messages.getMessageByCloudId(cloudId) != null) return;
+
+    final profile = CloudMessageMapper.authorProfileFromWire(json);
+    if (profile != null) {
+      await _messages.upsertParticipantProfile(profile);
+    }
+
+    final parentCloud = json['parent_id'] as String?;
+    String? parentGraphId;
+    if (parentCloud != null && parentCloud.isNotEmpty) {
+      parentGraphId = await _messages.resolveGraphMessageId(parentCloud);
+      if (parentGraphId == null) {
+        StitchLog.hop('dart.cloud', 'skip ingest id=$cloudId unknown parent=$parentCloud');
+        return;
+      }
+    }
+
+    final columnId = parentGraphId == null
+        ? (_activeColumnId ?? (_states.isNotEmpty ? _states.first.id : null))
+        : await _columnForIncomingParent(parentGraphId);
+    if (columnId == null) return;
+
+    final message = CloudMessageMapper.messageFromWire(json);
+    // Persist message + list enrichment before any refresh so highlights
+    // derive from tags/recipients on first paint.
+    await _messages.saveMessage(message);
+    await _persistWireEnrichment(message.id, json);
+
+    if (parentGraphId == null) {
+      await _columns.updateColumnAnchor(columnId, message.id);
+      await _refresh(columnId, anchorMessageId: message.id);
+      notifyListeners();
+      return;
+    }
+
+    await ingestIncomingMessage(
+      columnId: columnId,
+      message: message,
+      parentId: parentGraphId,
+    );
+  }
+
+  /// Persist list-authoritative tags + recipients from a cloud wire payload.
+  Future<void> _persistWireEnrichment(
+    String messageId,
+    Map<String, dynamic> json,
+  ) async {
+    final tags = CloudMessageMapper.tagsFromWire(json);
+    if (tags.isNotEmpty) {
+      await _messages.setMessageTags(messageId, tags);
+    }
+    for (final entry in CloudMessageMapper.recipientsFromWire(json)) {
+      await _messages.upsertParticipantProfile(entry.profile!);
+      await _messages.addRecipientEdge(
+        messageId,
+        entry.edge.recipientId,
+        entry.edge.kind,
+        isCloudBot: entry.edge.isCloudBot,
+        isPublic: entry.edge.isPublic,
+        notify: entry.edge.notify,
+        addedBy: entry.edge.addedBy,
+        addedAt: entry.edge.addedAt,
+      );
+    }
+  }
+
+  Future<String?> _columnForIncomingParent(String parentGraphId) async {
+    String? fallback;
+    for (final state in _states) {
+      final anchor = _anchors[state.id];
+      if (anchor == null) continue;
+      final tree = await _branchPathService.replyTreeIds(anchor);
+      if (!tree.contains(parentGraphId)) continue;
+      if (state.isActive) return state.id;
+      fallback ??= state.id;
+    }
+    return fallback ?? (_states.isNotEmpty ? _states.first.id : null);
+  }
+
+  String? get _activeColumnId {
+    for (final s in _states) {
+      if (s.isActive) return s.id;
+    }
+    return null;
+  }
+
+  /// Posted `@` highlight allow-set from recipients (+ author tag), not content.
+  Future<Set<String>> validMentionTagsFor(Message message) async {
+    final tags = <String>{};
+    if (message.authorId != null) {
+      final author = await _messages.getParticipantProfile(message.authorId!);
+      final tag = author?.userTag;
+      if (tag != null) tags.add(tag.toLowerCase());
+    }
+    final registry = _botBridge?.registry ?? const BotRegistry.empty();
+    for (final recipient in await _messages.getRecipients(message.id)) {
+      if (recipient.kind == RecipientKind.cloudUser) {
+        final profile =
+            await _messages.getParticipantProfile(recipient.recipientId);
+        final tag = profile?.userTag;
+        if (tag != null) tags.add(tag.toLowerCase());
+      } else if (recipient.kind == RecipientKind.localBot) {
+        // Prefer a content token that maps to this bot id; else the bot id.
+        for (final mention in registry.parseMentions(message.content)) {
+          if (mention.botId == recipient.recipientId) {
+            tags.add(mention.raw.toLowerCase());
+          }
+        }
+        tags.add(recipient.recipientId.toLowerCase());
+        for (final alias in registry.bots
+            .where((b) => b.id == recipient.recipientId)
+            .expand((b) => b.aliases)) {
+          tags.add(alias.toLowerCase());
+        }
+      }
+    }
+    return tags;
+  }
+
+  /// Posted `#` highlight allow-set from persisted message tags.
+  Future<Set<String>> validHashTagsFor(Message message) async {
+    final tags = await _messages.getMessageTags(message.id);
+    return {for (final t in tags) t.name.toLowerCase()};
+  }
+
+  /// Shared ingest for local-bot parts and cloud WS arrivals.
   /// Toasts when an eligible reply (`user` / `localBot`) attaches under the
   /// column's reply tree but would not appear on the current visible branch
   /// — thinking/tool roles stay silent.
@@ -744,6 +1336,14 @@ class ColumnsViewModel extends ChangeNotifier {
         incomingIndex = incoming.all.indexWhere((m) => m.id == branch[i - 1].id);
       }
 
+      final mentionTags = cloudFeaturesEnabled
+          ? await validMentionTagsFor(message)
+          : const <String>{};
+      final hashTags = cloudFeaturesEnabled
+          ? await validHashTagsFor(message)
+          : const <String>{};
+      final authorProfile = await participantProfile(message.authorId);
+
       rows.add(MessageRowData(
         message: message,
         outgoing: outgoing,
@@ -751,6 +1351,9 @@ class ColumnsViewModel extends ChangeNotifier {
         outgoingAnchorId: outgoingAnchorId,
         incoming: incoming,
         incomingCurrentIndex: incomingIndex,
+        highlightMentions: mentionTags,
+        highlightTags: hashTags,
+        authorProfile: authorProfile,
       ));
     }
 
@@ -781,11 +1384,181 @@ class ColumnsViewModel extends ChangeNotifier {
       _anchors[columnId] = anchorMessageId;
     }
     state.rows = rows;
+    _reapplyOutboundSends(columnId);
     state.topMarker = MarkerVisualState.end;
     state.bottomMarker = MarkerVisualState.end;
     state.topStitchCount = topStitchCount;
     state.bottomStitchCount = bottomStitchCount;
     state.topHiddenCount = topHiddenCount;
     state.bottomHiddenCount = bottomHiddenCount;
+    state.columnCloudSync = cloudFeaturesEnabled && anchorId != null
+        ? await _computeColumnCloudSync(anchorId)
+        : ColumnCloudSyncState.idle;
+
+    // Tip (or explicit reply target) may have changed — keep draft recipients
+    // in sync so Recipients (N) reflects the reply-parent author before send.
+    await _syncReplyParentDraftRecipient(columnId);
   }
+
+  Future<ColumnCloudSyncState> _computeColumnCloudSync(String anchorId) async {
+    final treeIds = await _branchPathService.replyTreeIds(anchorId);
+    var pending = false;
+    var failed = false;
+    for (final id in treeIds) {
+      final msg = await _messages.getMessage(id);
+      if (msg == null) continue;
+      if (msg.syncStatus == CloudSyncStatus.pending) pending = true;
+      if (msg.syncStatus == CloudSyncStatus.failed) failed = true;
+    }
+    if (failed) return ColumnCloudSyncState.failed;
+    if (pending) return ColumnCloudSyncState.pending;
+    return ColumnCloudSyncState.idle;
+  }
+
+  /// Stage the reply-parent author onto the draft from the visible row only
+  /// (no awaits). Used at send kickoff so the recipient snapshot is complete
+  /// before the composer clear can race the event loop.
+  void _stageReplyParentAuthorFromRows(String columnId) {
+    final draft = draftSettingsFor(columnId);
+    final parentId = _effectiveReplyParentId(columnId);
+    if (parentId == null) {
+      syncReplyParentAuthor(
+        draft,
+        parentMessageId: null,
+        authorId: null,
+        currentUserId: _identity.currentUserId,
+        kind: RecipientKind.cloudUser,
+      );
+      return;
+    }
+
+    MessageRowData? parentRow;
+    for (final row in _stateFor(columnId).rows) {
+      if (row.message.id == parentId) {
+        parentRow = row;
+        break;
+      }
+    }
+    if (parentRow == null) return;
+
+    final parentMessage = parentRow.message;
+    final authorId = parentMessage.authorId;
+    var kind = RecipientKind.cloudUser;
+    String? userTag;
+    var isCloudBot = false;
+    if (authorId != null && authorId != _identity.currentUserId) {
+      if (parentMessage.role == MessageRole.localBot) {
+        kind = RecipientKind.localBot;
+        userTag = authorId;
+      } else {
+        userTag = parentRow.authorProfile?.userTag;
+        isCloudBot = parentRow.authorProfile?.isBot ?? false;
+      }
+    }
+
+    syncReplyParentAuthor(
+      draft,
+      parentMessageId: parentId,
+      authorId: authorId,
+      currentUserId: _identity.currentUserId,
+      kind: kind,
+      userTag: userTag,
+      isCloudBot: isCloudBot,
+    );
+  }
+
+  void _beginOutboundSend(_OutboundSend send) {
+    _outboundSends[send.message.id] = send;
+    _applyOutboundSendToState(_stateFor(send.columnId), send);
+  }
+
+  void _cancelOutboundSend(String messageId) {
+    final send = _outboundSends.remove(messageId);
+    if (send == null) return;
+    final state = _stateFor(send.columnId);
+    state.rows = [
+      for (final row in state.rows)
+        if (row.message.id != messageId) row,
+    ];
+  }
+
+  void _reapplyOutboundSends(String columnId) {
+    for (final send in _outboundSends.values) {
+      if (send.columnId != columnId) continue;
+      _applyOutboundSendToState(_stateFor(columnId), send);
+    }
+  }
+
+  void _applyOutboundSendToState(ColumnUiState state, _OutboundSend send) {
+    final sending = send.message.copyWith(isSending: true);
+    final existingIndex =
+        state.rows.indexWhere((r) => r.message.id == send.message.id);
+    if (existingIndex >= 0) {
+      final row = state.rows[existingIndex];
+      final rows = List<MessageRowData>.from(state.rows);
+      rows[existingIndex] = MessageRowData(
+        message: sending.copyWith(
+          syncStatus: row.message.syncStatus,
+          cloudMessageId: row.message.cloudMessageId,
+          syncError: row.message.syncError,
+        ),
+        outgoing: row.outgoing,
+        outgoingCurrentIndex: row.outgoingCurrentIndex,
+        outgoingAnchorId: row.outgoingAnchorId,
+        incoming: row.incoming,
+        incomingCurrentIndex: row.incomingCurrentIndex,
+        highlightMentions: row.highlightMentions.isNotEmpty
+            ? row.highlightMentions
+            : send.highlightMentions,
+        highlightTags:
+            row.highlightTags.isNotEmpty ? row.highlightTags : send.highlightTags,
+        authorProfile: row.authorProfile,
+      );
+      state.rows = rows;
+      return;
+    }
+
+    final optimistic = MessageRowData(
+      message: sending,
+      outgoing: null,
+      outgoingCurrentIndex: -1,
+      outgoingAnchorId: send.parentId,
+      incoming: null,
+      incomingCurrentIndex: -1,
+      highlightMentions: send.highlightMentions,
+      highlightTags: send.highlightTags,
+    );
+
+    final parentId = send.parentId;
+    if (parentId != null) {
+      final parentIndex =
+          state.rows.indexWhere((r) => r.message.id == parentId);
+      if (parentIndex >= 0) {
+        state.rows = [
+          ...state.rows.sublist(0, parentIndex + 1),
+          optimistic,
+        ];
+        return;
+      }
+    }
+    state.rows = [...state.rows, optimistic];
+  }
+}
+
+/// In-memory optimistic outbound send until persist (+ optional cloud notify)
+/// settles. Not a DB row.
+class _OutboundSend {
+  final String columnId;
+  final String? parentId;
+  final Message message;
+  final Set<String> highlightMentions;
+  final Set<String> highlightTags;
+
+  const _OutboundSend({
+    required this.columnId,
+    required this.parentId,
+    required this.message,
+    this.highlightMentions = const {},
+    this.highlightTags = const {},
+  });
 }

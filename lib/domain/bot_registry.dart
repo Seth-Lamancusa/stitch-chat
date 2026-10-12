@@ -64,7 +64,33 @@ class BotRegistry {
   final Map<String, BotSpec> _byId;
   final Map<String, String> _aliasToId;
 
+  /// Canonical bots advertised by the bridge, sorted by [BotSpec.id].
+  List<BotSpec> get bots {
+    final list = _byId.values.toList()
+      ..sort((a, b) => a.id.compareTo(b.id));
+    return List.unmodifiable(list);
+  }
+
   bool requiresCwd(String botId) => _byId[botId]?.requiresCwd ?? false;
+
+  bool isKnownBot(String botId) => _byId.containsKey(botId);
+
+  /// `@` autocomplete: alias tags (without `@`) matching [query] prefix.
+  ///
+  /// Empty [query] returns up to [limit] tags in stable order. Unknown tags
+  /// are omitted from suggestions the same way [parseMentions] ignores them.
+  List<String> searchTagSuggestions(String query, {int limit = 15}) {
+    if (limit <= 0) return const [];
+    final prefix = query.toLowerCase();
+    final tags = _aliasToId.keys
+        .where((tag) => prefix.isEmpty || tag.startsWith(prefix))
+        .toList()
+      ..sort();
+    if (tags.length <= limit) return tags;
+    return tags.sublist(0, limit);
+  }
+
+  String? botIdForTag(String tag) => _aliasToId[tag.toLowerCase()];
 
   /// Returns distinct local bots tagged in [content], in first-seen order.
   List<BotMention> parseMentions(String content) {

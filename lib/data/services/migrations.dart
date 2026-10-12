@@ -29,6 +29,20 @@ final Map<int, Migration> migrations = {
   5: (m, db) async {
     await m.addColumn(db.replyEdges, db.replyEdges.hidden);
   },
+  6: (m, db) async {
+    await m.addColumn(db.messages, db.messages.cloudMessageId);
+    await m.addColumn(db.messages, db.messages.syncStatus);
+    await m.addColumn(db.messages, db.messages.syncError);
+    await m.addColumn(db.recipientEdges, db.recipientEdges.isCloudBot);
+    await m.createTable(db.participantProfiles);
+  },
+  7: (m, db) async {
+    await m.addColumn(db.recipientEdges, db.recipientEdges.isPublic);
+    await m.addColumn(db.recipientEdges, db.recipientEdges.notify);
+    await m.addColumn(db.recipientEdges, db.recipientEdges.addedBy);
+    await m.addColumn(db.recipientEdges, db.recipientEdges.addedAt);
+    await m.createTable(db.messageTags);
+  },
 };
 
 Future<void> runMigrations(Migrator m, AppDatabase db, int from, int to) async {

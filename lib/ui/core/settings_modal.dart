@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/settings/message_font_service.dart';
 import '../../core/settings/theme_service.dart';
 import '../../data/models/auth_state.dart';
 import '../auth/login_screen.dart';
@@ -106,6 +107,51 @@ void showSettingsModal(BuildContext context) {
                                 onChanged: themeService.setDarkMode,
                                 activeThumbColor: colorScheme.primary,
                               ),
+                            ),
+                            const SizedBox(height: 8),
+                            Consumer<MessageFontService>(
+                              builder: (context, fontService, _) {
+                                final size = fontService.fontSize.round();
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    ListTile(
+                                      contentPadding: EdgeInsets.zero,
+                                      title: Text(
+                                        'Message font size',
+                                        style: TextStyle(color: colorScheme.onSurface),
+                                      ),
+                                      trailing: Text(
+                                        '$size',
+                                        style: TextStyle(
+                                          color: colorScheme.onSurfaceVariant,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                    Slider(
+                                      value: fontService.fontSize,
+                                      min: MessageFontService.minSize,
+                                      max: MessageFontService.maxSize,
+                                      divisions: (MessageFontService.maxSize -
+                                              MessageFontService.minSize)
+                                          .round(),
+                                      label: '$size',
+                                      onChanged: fontService.setFontSize,
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 8),
+                                      child: Text(
+                                        'Aa — The quick brown fox',
+                                        style: TextStyle(
+                                          color: colorScheme.onSurface,
+                                          fontSize: fontService.fontSize,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
                             ),
                             const SizedBox(height: 16),
                           ],

@@ -52,6 +52,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  file_selector_platform_interface: ^2.7.0
   drift_dev: ^2.24.0
   build_runner: ^2.4.13
 

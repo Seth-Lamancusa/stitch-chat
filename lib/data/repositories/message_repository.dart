@@ -1,5 +1,8 @@
+import '../models/cloud_sync_status.dart';
 import '../models/edges.dart';
 import '../models/message.dart';
+import '../models/message_tag.dart';
+import '../models/participant_profile.dart';
 
 export '../models/edges.dart' show OutgoingEdges, IncomingEdges;
 
@@ -61,11 +64,25 @@ abstract class MessageRepository {
 
   Future<void> addStitchEdge(String fromId, String toId, {String? createdByAuthorId});
 
-  Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind);
+  Future<void> addRecipientEdge(
+    String messageId,
+    String recipientId,
+    RecipientKind kind, {
+    bool isCloudBot = false,
+    bool isPublic = true,
+    bool notify = true,
+    String? addedBy,
+    DateTime? addedAt,
+  });
 
   /// Existing recipient edges on [messageId] — used to inherit a parent
   /// message's addressees onto a reply.
   Future<List<RecipientRef>> getRecipients(String messageId);
+
+  /// Replace the authoritative hashtag list for [messageId] (full replace).
+  Future<void> setMessageTags(String messageId, List<MessageTag> tags);
+
+  Future<List<MessageTag>> getMessageTags(String messageId);
 
   Future<void> deleteMessage(String id);
 
@@ -77,4 +94,20 @@ abstract class MessageRepository {
     required String fromAuthorId,
     required String toAuthorId,
   });
+
+  /// Local row id for graph edges, or null if unknown.
+  Future<String?> resolveGraphMessageId(String cloudOrLocalId);
+
+  Future<Message?> getMessageByCloudId(String cloudMessageId);
+
+  Future<void> updateCloudSync({
+    required String localMessageId,
+    CloudSyncStatus? syncStatus,
+    String? cloudMessageId,
+    String? syncError,
+  });
+
+  Future<void> upsertParticipantProfile(ParticipantProfile profile);
+
+  Future<ParticipantProfile?> getParticipantProfile(String uid);
 }

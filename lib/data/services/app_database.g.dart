@@ -71,6 +71,38 @@ class $MessagesTable extends Messages
     type: DriftSqlType.dateTime,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _cloudMessageIdMeta = const VerificationMeta(
+    'cloudMessageId',
+  );
+  @override
+  late final GeneratedColumn<String> cloudMessageId = GeneratedColumn<String>(
+    'cloud_message_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  late final GeneratedColumnWithTypeConverter<CloudSyncStatus, String>
+  syncStatus = GeneratedColumn<String>(
+    'sync_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('none'),
+  ).withConverter<CloudSyncStatus>($MessagesTable.$convertersyncStatus);
+  static const VerificationMeta _syncErrorMeta = const VerificationMeta(
+    'syncError',
+  );
+  @override
+  late final GeneratedColumn<String> syncError = GeneratedColumn<String>(
+    'sync_error',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -79,6 +111,9 @@ class $MessagesTable extends Messages
     content,
     gitCommit,
     createdAt,
+    cloudMessageId,
+    syncStatus,
+    syncError,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -123,6 +158,21 @@ class $MessagesTable extends Messages
         createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
       );
     }
+    if (data.containsKey('cloud_message_id')) {
+      context.handle(
+        _cloudMessageIdMeta,
+        cloudMessageId.isAcceptableOrUnknown(
+          data['cloud_message_id']!,
+          _cloudMessageIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sync_error')) {
+      context.handle(
+        _syncErrorMeta,
+        syncError.isAcceptableOrUnknown(data['sync_error']!, _syncErrorMeta),
+      );
+    }
     return context;
   }
 
@@ -158,6 +208,20 @@ class $MessagesTable extends Messages
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
       ),
+      cloudMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}cloud_message_id'],
+      ),
+      syncStatus: $MessagesTable.$convertersyncStatus.fromSql(
+        attachedDatabase.typeMapping.read(
+          DriftSqlType.string,
+          data['${effectivePrefix}sync_status'],
+        )!,
+      ),
+      syncError: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sync_error'],
+      ),
     );
   }
 
@@ -168,6 +232,10 @@ class $MessagesTable extends Messages
 
   static JsonTypeConverter2<MessageRole, String, String> $converterrole =
       const EnumNameConverter<MessageRole>(MessageRole.values);
+  static JsonTypeConverter2<CloudSyncStatus, String, String>
+  $convertersyncStatus = const EnumNameConverter<CloudSyncStatus>(
+    CloudSyncStatus.values,
+  );
 }
 
 class MessageRow extends DataClass implements Insertable<MessageRow> {
@@ -177,6 +245,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
   final String content;
   final String? gitCommit;
   final DateTime? createdAt;
+  final String? cloudMessageId;
+  final CloudSyncStatus syncStatus;
+  final String? syncError;
   const MessageRow({
     required this.id,
     required this.role,
@@ -184,6 +255,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     required this.content,
     this.gitCommit,
     this.createdAt,
+    this.cloudMessageId,
+    required this.syncStatus,
+    this.syncError,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -202,6 +276,17 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     if (!nullToAbsent || createdAt != null) {
       map['created_at'] = Variable<DateTime>(createdAt);
     }
+    if (!nullToAbsent || cloudMessageId != null) {
+      map['cloud_message_id'] = Variable<String>(cloudMessageId);
+    }
+    {
+      map['sync_status'] = Variable<String>(
+        $MessagesTable.$convertersyncStatus.toSql(syncStatus),
+      );
+    }
+    if (!nullToAbsent || syncError != null) {
+      map['sync_error'] = Variable<String>(syncError);
+    }
     return map;
   }
 
@@ -219,6 +304,13 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       createdAt: createdAt == null && nullToAbsent
           ? const Value.absent()
           : Value(createdAt),
+      cloudMessageId: cloudMessageId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(cloudMessageId),
+      syncStatus: Value(syncStatus),
+      syncError: syncError == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncError),
     );
   }
 
@@ -236,6 +328,11 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       content: serializer.fromJson<String>(json['content']),
       gitCommit: serializer.fromJson<String?>(json['gitCommit']),
       createdAt: serializer.fromJson<DateTime?>(json['createdAt']),
+      cloudMessageId: serializer.fromJson<String?>(json['cloudMessageId']),
+      syncStatus: $MessagesTable.$convertersyncStatus.fromJson(
+        serializer.fromJson<String>(json['syncStatus']),
+      ),
+      syncError: serializer.fromJson<String?>(json['syncError']),
     );
   }
   @override
@@ -250,6 +347,11 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       'content': serializer.toJson<String>(content),
       'gitCommit': serializer.toJson<String?>(gitCommit),
       'createdAt': serializer.toJson<DateTime?>(createdAt),
+      'cloudMessageId': serializer.toJson<String?>(cloudMessageId),
+      'syncStatus': serializer.toJson<String>(
+        $MessagesTable.$convertersyncStatus.toJson(syncStatus),
+      ),
+      'syncError': serializer.toJson<String?>(syncError),
     };
   }
 
@@ -260,6 +362,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     String? content,
     Value<String?> gitCommit = const Value.absent(),
     Value<DateTime?> createdAt = const Value.absent(),
+    Value<String?> cloudMessageId = const Value.absent(),
+    CloudSyncStatus? syncStatus,
+    Value<String?> syncError = const Value.absent(),
   }) => MessageRow(
     id: id ?? this.id,
     role: role ?? this.role,
@@ -267,6 +372,11 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     content: content ?? this.content,
     gitCommit: gitCommit.present ? gitCommit.value : this.gitCommit,
     createdAt: createdAt.present ? createdAt.value : this.createdAt,
+    cloudMessageId: cloudMessageId.present
+        ? cloudMessageId.value
+        : this.cloudMessageId,
+    syncStatus: syncStatus ?? this.syncStatus,
+    syncError: syncError.present ? syncError.value : this.syncError,
   );
   MessageRow copyWithCompanion(MessagesCompanion data) {
     return MessageRow(
@@ -276,6 +386,13 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       content: data.content.present ? data.content.value : this.content,
       gitCommit: data.gitCommit.present ? data.gitCommit.value : this.gitCommit,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      cloudMessageId: data.cloudMessageId.present
+          ? data.cloudMessageId.value
+          : this.cloudMessageId,
+      syncStatus: data.syncStatus.present
+          ? data.syncStatus.value
+          : this.syncStatus,
+      syncError: data.syncError.present ? data.syncError.value : this.syncError,
     );
   }
 
@@ -287,14 +404,26 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           ..write('authorId: $authorId, ')
           ..write('content: $content, ')
           ..write('gitCommit: $gitCommit, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('cloudMessageId: $cloudMessageId, ')
+          ..write('syncStatus: $syncStatus, ')
+          ..write('syncError: $syncError')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, role, authorId, content, gitCommit, createdAt);
+  int get hashCode => Object.hash(
+    id,
+    role,
+    authorId,
+    content,
+    gitCommit,
+    createdAt,
+    cloudMessageId,
+    syncStatus,
+    syncError,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -304,7 +433,10 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           other.authorId == this.authorId &&
           other.content == this.content &&
           other.gitCommit == this.gitCommit &&
-          other.createdAt == this.createdAt);
+          other.createdAt == this.createdAt &&
+          other.cloudMessageId == this.cloudMessageId &&
+          other.syncStatus == this.syncStatus &&
+          other.syncError == this.syncError);
 }
 
 class MessagesCompanion extends UpdateCompanion<MessageRow> {
@@ -314,6 +446,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
   final Value<String> content;
   final Value<String?> gitCommit;
   final Value<DateTime?> createdAt;
+  final Value<String?> cloudMessageId;
+  final Value<CloudSyncStatus> syncStatus;
+  final Value<String?> syncError;
   final Value<int> rowid;
   const MessagesCompanion({
     this.id = const Value.absent(),
@@ -322,6 +457,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     this.content = const Value.absent(),
     this.gitCommit = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.cloudMessageId = const Value.absent(),
+    this.syncStatus = const Value.absent(),
+    this.syncError = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -331,6 +469,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     required String content,
     this.gitCommit = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.cloudMessageId = const Value.absent(),
+    this.syncStatus = const Value.absent(),
+    this.syncError = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        role = Value(role),
@@ -342,6 +483,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Expression<String>? content,
     Expression<String>? gitCommit,
     Expression<DateTime>? createdAt,
+    Expression<String>? cloudMessageId,
+    Expression<String>? syncStatus,
+    Expression<String>? syncError,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -351,6 +495,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       if (content != null) 'content': content,
       if (gitCommit != null) 'git_commit': gitCommit,
       if (createdAt != null) 'created_at': createdAt,
+      if (cloudMessageId != null) 'cloud_message_id': cloudMessageId,
+      if (syncStatus != null) 'sync_status': syncStatus,
+      if (syncError != null) 'sync_error': syncError,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -362,6 +509,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Value<String>? content,
     Value<String?>? gitCommit,
     Value<DateTime?>? createdAt,
+    Value<String?>? cloudMessageId,
+    Value<CloudSyncStatus>? syncStatus,
+    Value<String?>? syncError,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -371,6 +521,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       content: content ?? this.content,
       gitCommit: gitCommit ?? this.gitCommit,
       createdAt: createdAt ?? this.createdAt,
+      cloudMessageId: cloudMessageId ?? this.cloudMessageId,
+      syncStatus: syncStatus ?? this.syncStatus,
+      syncError: syncError ?? this.syncError,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -398,6 +551,17 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
+    if (cloudMessageId.present) {
+      map['cloud_message_id'] = Variable<String>(cloudMessageId.value);
+    }
+    if (syncStatus.present) {
+      map['sync_status'] = Variable<String>(
+        $MessagesTable.$convertersyncStatus.toSql(syncStatus.value),
+      );
+    }
+    if (syncError.present) {
+      map['sync_error'] = Variable<String>(syncError.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -413,6 +577,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
           ..write('content: $content, ')
           ..write('gitCommit: $gitCommit, ')
           ..write('createdAt: $createdAt, ')
+          ..write('cloudMessageId: $cloudMessageId, ')
+          ..write('syncStatus: $syncStatus, ')
+          ..write('syncError: $syncError, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1067,8 +1234,82 @@ class $RecipientEdgesTable extends RecipientEdges
         type: DriftSqlType.string,
         requiredDuringInsert: true,
       ).withConverter<RecipientKind>($RecipientEdgesTable.$converterkind);
+  static const VerificationMeta _isCloudBotMeta = const VerificationMeta(
+    'isCloudBot',
+  );
   @override
-  List<GeneratedColumn> get $columns => [messageId, recipientId, kind];
+  late final GeneratedColumn<bool> isCloudBot = GeneratedColumn<bool>(
+    'is_cloud_bot',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_cloud_bot" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _isPublicMeta = const VerificationMeta(
+    'isPublic',
+  );
+  @override
+  late final GeneratedColumn<bool> isPublic = GeneratedColumn<bool>(
+    'is_public',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_public" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _notifyMeta = const VerificationMeta('notify');
+  @override
+  late final GeneratedColumn<bool> notify = GeneratedColumn<bool>(
+    'notify',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("notify" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _addedByMeta = const VerificationMeta(
+    'addedBy',
+  );
+  @override
+  late final GeneratedColumn<String> addedBy = GeneratedColumn<String>(
+    'added_by',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _addedAtMeta = const VerificationMeta(
+    'addedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> addedAt = GeneratedColumn<DateTime>(
+    'added_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    messageId,
+    recipientId,
+    kind,
+    isCloudBot,
+    isPublic,
+    notify,
+    addedBy,
+    addedAt,
+  ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -1100,6 +1341,39 @@ class $RecipientEdgesTable extends RecipientEdges
     } else if (isInserting) {
       context.missing(_recipientIdMeta);
     }
+    if (data.containsKey('is_cloud_bot')) {
+      context.handle(
+        _isCloudBotMeta,
+        isCloudBot.isAcceptableOrUnknown(
+          data['is_cloud_bot']!,
+          _isCloudBotMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_public')) {
+      context.handle(
+        _isPublicMeta,
+        isPublic.isAcceptableOrUnknown(data['is_public']!, _isPublicMeta),
+      );
+    }
+    if (data.containsKey('notify')) {
+      context.handle(
+        _notifyMeta,
+        notify.isAcceptableOrUnknown(data['notify']!, _notifyMeta),
+      );
+    }
+    if (data.containsKey('added_by')) {
+      context.handle(
+        _addedByMeta,
+        addedBy.isAcceptableOrUnknown(data['added_by']!, _addedByMeta),
+      );
+    }
+    if (data.containsKey('added_at')) {
+      context.handle(
+        _addedAtMeta,
+        addedAt.isAcceptableOrUnknown(data['added_at']!, _addedAtMeta),
+      );
+    }
     return context;
   }
 
@@ -1123,6 +1397,26 @@ class $RecipientEdgesTable extends RecipientEdges
           data['${effectivePrefix}kind'],
         )!,
       ),
+      isCloudBot: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_cloud_bot'],
+      )!,
+      isPublic: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_public'],
+      )!,
+      notify: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}notify'],
+      )!,
+      addedBy: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}added_by'],
+      ),
+      addedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}added_at'],
+      ),
     );
   }
 
@@ -1139,10 +1433,20 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
   final String messageId;
   final String recipientId;
   final RecipientKind kind;
+  final bool isCloudBot;
+  final bool isPublic;
+  final bool notify;
+  final String? addedBy;
+  final DateTime? addedAt;
   const RecipientEdge({
     required this.messageId,
     required this.recipientId,
     required this.kind,
+    required this.isCloudBot,
+    required this.isPublic,
+    required this.notify,
+    this.addedBy,
+    this.addedAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1154,6 +1458,15 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
         $RecipientEdgesTable.$converterkind.toSql(kind),
       );
     }
+    map['is_cloud_bot'] = Variable<bool>(isCloudBot);
+    map['is_public'] = Variable<bool>(isPublic);
+    map['notify'] = Variable<bool>(notify);
+    if (!nullToAbsent || addedBy != null) {
+      map['added_by'] = Variable<String>(addedBy);
+    }
+    if (!nullToAbsent || addedAt != null) {
+      map['added_at'] = Variable<DateTime>(addedAt);
+    }
     return map;
   }
 
@@ -1162,6 +1475,15 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
       messageId: Value(messageId),
       recipientId: Value(recipientId),
       kind: Value(kind),
+      isCloudBot: Value(isCloudBot),
+      isPublic: Value(isPublic),
+      notify: Value(notify),
+      addedBy: addedBy == null && nullToAbsent
+          ? const Value.absent()
+          : Value(addedBy),
+      addedAt: addedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(addedAt),
     );
   }
 
@@ -1176,6 +1498,11 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
       kind: $RecipientEdgesTable.$converterkind.fromJson(
         serializer.fromJson<String>(json['kind']),
       ),
+      isCloudBot: serializer.fromJson<bool>(json['isCloudBot']),
+      isPublic: serializer.fromJson<bool>(json['isPublic']),
+      notify: serializer.fromJson<bool>(json['notify']),
+      addedBy: serializer.fromJson<String?>(json['addedBy']),
+      addedAt: serializer.fromJson<DateTime?>(json['addedAt']),
     );
   }
   @override
@@ -1187,6 +1514,11 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
       'kind': serializer.toJson<String>(
         $RecipientEdgesTable.$converterkind.toJson(kind),
       ),
+      'isCloudBot': serializer.toJson<bool>(isCloudBot),
+      'isPublic': serializer.toJson<bool>(isPublic),
+      'notify': serializer.toJson<bool>(notify),
+      'addedBy': serializer.toJson<String?>(addedBy),
+      'addedAt': serializer.toJson<DateTime?>(addedAt),
     };
   }
 
@@ -1194,10 +1526,20 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
     String? messageId,
     String? recipientId,
     RecipientKind? kind,
+    bool? isCloudBot,
+    bool? isPublic,
+    bool? notify,
+    Value<String?> addedBy = const Value.absent(),
+    Value<DateTime?> addedAt = const Value.absent(),
   }) => RecipientEdge(
     messageId: messageId ?? this.messageId,
     recipientId: recipientId ?? this.recipientId,
     kind: kind ?? this.kind,
+    isCloudBot: isCloudBot ?? this.isCloudBot,
+    isPublic: isPublic ?? this.isPublic,
+    notify: notify ?? this.notify,
+    addedBy: addedBy.present ? addedBy.value : this.addedBy,
+    addedAt: addedAt.present ? addedAt.value : this.addedAt,
   );
   RecipientEdge copyWithCompanion(RecipientEdgesCompanion data) {
     return RecipientEdge(
@@ -1206,6 +1548,13 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
           ? data.recipientId.value
           : this.recipientId,
       kind: data.kind.present ? data.kind.value : this.kind,
+      isCloudBot: data.isCloudBot.present
+          ? data.isCloudBot.value
+          : this.isCloudBot,
+      isPublic: data.isPublic.present ? data.isPublic.value : this.isPublic,
+      notify: data.notify.present ? data.notify.value : this.notify,
+      addedBy: data.addedBy.present ? data.addedBy.value : this.addedBy,
+      addedAt: data.addedAt.present ? data.addedAt.value : this.addedAt,
     );
   }
 
@@ -1214,37 +1563,71 @@ class RecipientEdge extends DataClass implements Insertable<RecipientEdge> {
     return (StringBuffer('RecipientEdge(')
           ..write('messageId: $messageId, ')
           ..write('recipientId: $recipientId, ')
-          ..write('kind: $kind')
+          ..write('kind: $kind, ')
+          ..write('isCloudBot: $isCloudBot, ')
+          ..write('isPublic: $isPublic, ')
+          ..write('notify: $notify, ')
+          ..write('addedBy: $addedBy, ')
+          ..write('addedAt: $addedAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(messageId, recipientId, kind);
+  int get hashCode => Object.hash(
+    messageId,
+    recipientId,
+    kind,
+    isCloudBot,
+    isPublic,
+    notify,
+    addedBy,
+    addedAt,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is RecipientEdge &&
           other.messageId == this.messageId &&
           other.recipientId == this.recipientId &&
-          other.kind == this.kind);
+          other.kind == this.kind &&
+          other.isCloudBot == this.isCloudBot &&
+          other.isPublic == this.isPublic &&
+          other.notify == this.notify &&
+          other.addedBy == this.addedBy &&
+          other.addedAt == this.addedAt);
 }
 
 class RecipientEdgesCompanion extends UpdateCompanion<RecipientEdge> {
   final Value<String> messageId;
   final Value<String> recipientId;
   final Value<RecipientKind> kind;
+  final Value<bool> isCloudBot;
+  final Value<bool> isPublic;
+  final Value<bool> notify;
+  final Value<String?> addedBy;
+  final Value<DateTime?> addedAt;
   final Value<int> rowid;
   const RecipientEdgesCompanion({
     this.messageId = const Value.absent(),
     this.recipientId = const Value.absent(),
     this.kind = const Value.absent(),
+    this.isCloudBot = const Value.absent(),
+    this.isPublic = const Value.absent(),
+    this.notify = const Value.absent(),
+    this.addedBy = const Value.absent(),
+    this.addedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   RecipientEdgesCompanion.insert({
     required String messageId,
     required String recipientId,
     required RecipientKind kind,
+    this.isCloudBot = const Value.absent(),
+    this.isPublic = const Value.absent(),
+    this.notify = const Value.absent(),
+    this.addedBy = const Value.absent(),
+    this.addedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : messageId = Value(messageId),
        recipientId = Value(recipientId),
@@ -1253,12 +1636,22 @@ class RecipientEdgesCompanion extends UpdateCompanion<RecipientEdge> {
     Expression<String>? messageId,
     Expression<String>? recipientId,
     Expression<String>? kind,
+    Expression<bool>? isCloudBot,
+    Expression<bool>? isPublic,
+    Expression<bool>? notify,
+    Expression<String>? addedBy,
+    Expression<DateTime>? addedAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
       if (messageId != null) 'message_id': messageId,
       if (recipientId != null) 'recipient_id': recipientId,
       if (kind != null) 'kind': kind,
+      if (isCloudBot != null) 'is_cloud_bot': isCloudBot,
+      if (isPublic != null) 'is_public': isPublic,
+      if (notify != null) 'notify': notify,
+      if (addedBy != null) 'added_by': addedBy,
+      if (addedAt != null) 'added_at': addedAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1267,12 +1660,22 @@ class RecipientEdgesCompanion extends UpdateCompanion<RecipientEdge> {
     Value<String>? messageId,
     Value<String>? recipientId,
     Value<RecipientKind>? kind,
+    Value<bool>? isCloudBot,
+    Value<bool>? isPublic,
+    Value<bool>? notify,
+    Value<String?>? addedBy,
+    Value<DateTime?>? addedAt,
     Value<int>? rowid,
   }) {
     return RecipientEdgesCompanion(
       messageId: messageId ?? this.messageId,
       recipientId: recipientId ?? this.recipientId,
       kind: kind ?? this.kind,
+      isCloudBot: isCloudBot ?? this.isCloudBot,
+      isPublic: isPublic ?? this.isPublic,
+      notify: notify ?? this.notify,
+      addedBy: addedBy ?? this.addedBy,
+      addedAt: addedAt ?? this.addedAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1291,6 +1694,21 @@ class RecipientEdgesCompanion extends UpdateCompanion<RecipientEdge> {
         $RecipientEdgesTable.$converterkind.toSql(kind.value),
       );
     }
+    if (isCloudBot.present) {
+      map['is_cloud_bot'] = Variable<bool>(isCloudBot.value);
+    }
+    if (isPublic.present) {
+      map['is_public'] = Variable<bool>(isPublic.value);
+    }
+    if (notify.present) {
+      map['notify'] = Variable<bool>(notify.value);
+    }
+    if (addedBy.present) {
+      map['added_by'] = Variable<String>(addedBy.value);
+    }
+    if (addedAt.present) {
+      map['added_at'] = Variable<DateTime>(addedAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1303,6 +1721,709 @@ class RecipientEdgesCompanion extends UpdateCompanion<RecipientEdge> {
           ..write('messageId: $messageId, ')
           ..write('recipientId: $recipientId, ')
           ..write('kind: $kind, ')
+          ..write('isCloudBot: $isCloudBot, ')
+          ..write('isPublic: $isPublic, ')
+          ..write('notify: $notify, ')
+          ..write('addedBy: $addedBy, ')
+          ..write('addedAt: $addedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $MessageTagsTable extends MessageTags
+    with TableInfo<$MessageTagsTable, MessageTagRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MessageTagsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _messageIdMeta = const VerificationMeta(
+    'messageId',
+  );
+  @override
+  late final GeneratedColumn<String> messageId = GeneratedColumn<String>(
+    'message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES messages (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _addedByMeta = const VerificationMeta(
+    'addedBy',
+  );
+  @override
+  late final GeneratedColumn<String> addedBy = GeneratedColumn<String>(
+    'added_by',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _addedByTagMeta = const VerificationMeta(
+    'addedByTag',
+  );
+  @override
+  late final GeneratedColumn<String> addedByTag = GeneratedColumn<String>(
+    'added_by_tag',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    messageId,
+    name,
+    createdAt,
+    addedBy,
+    addedByTag,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'message_tags';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MessageTagRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('message_id')) {
+      context.handle(
+        _messageIdMeta,
+        messageId.isAcceptableOrUnknown(data['message_id']!, _messageIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_messageIdMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    }
+    if (data.containsKey('added_by')) {
+      context.handle(
+        _addedByMeta,
+        addedBy.isAcceptableOrUnknown(data['added_by']!, _addedByMeta),
+      );
+    }
+    if (data.containsKey('added_by_tag')) {
+      context.handle(
+        _addedByTagMeta,
+        addedByTag.isAcceptableOrUnknown(
+          data['added_by_tag']!,
+          _addedByTagMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {messageId, name};
+  @override
+  MessageTagRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MessageTagRow(
+      messageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}message_id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      ),
+      addedBy: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}added_by'],
+      ),
+      addedByTag: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}added_by_tag'],
+      ),
+    );
+  }
+
+  @override
+  $MessageTagsTable createAlias(String alias) {
+    return $MessageTagsTable(attachedDatabase, alias);
+  }
+}
+
+class MessageTagRow extends DataClass implements Insertable<MessageTagRow> {
+  final String messageId;
+  final String name;
+  final DateTime? createdAt;
+  final String? addedBy;
+  final String? addedByTag;
+  const MessageTagRow({
+    required this.messageId,
+    required this.name,
+    this.createdAt,
+    this.addedBy,
+    this.addedByTag,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['message_id'] = Variable<String>(messageId);
+    map['name'] = Variable<String>(name);
+    if (!nullToAbsent || createdAt != null) {
+      map['created_at'] = Variable<DateTime>(createdAt);
+    }
+    if (!nullToAbsent || addedBy != null) {
+      map['added_by'] = Variable<String>(addedBy);
+    }
+    if (!nullToAbsent || addedByTag != null) {
+      map['added_by_tag'] = Variable<String>(addedByTag);
+    }
+    return map;
+  }
+
+  MessageTagsCompanion toCompanion(bool nullToAbsent) {
+    return MessageTagsCompanion(
+      messageId: Value(messageId),
+      name: Value(name),
+      createdAt: createdAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(createdAt),
+      addedBy: addedBy == null && nullToAbsent
+          ? const Value.absent()
+          : Value(addedBy),
+      addedByTag: addedByTag == null && nullToAbsent
+          ? const Value.absent()
+          : Value(addedByTag),
+    );
+  }
+
+  factory MessageTagRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MessageTagRow(
+      messageId: serializer.fromJson<String>(json['messageId']),
+      name: serializer.fromJson<String>(json['name']),
+      createdAt: serializer.fromJson<DateTime?>(json['createdAt']),
+      addedBy: serializer.fromJson<String?>(json['addedBy']),
+      addedByTag: serializer.fromJson<String?>(json['addedByTag']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'messageId': serializer.toJson<String>(messageId),
+      'name': serializer.toJson<String>(name),
+      'createdAt': serializer.toJson<DateTime?>(createdAt),
+      'addedBy': serializer.toJson<String?>(addedBy),
+      'addedByTag': serializer.toJson<String?>(addedByTag),
+    };
+  }
+
+  MessageTagRow copyWith({
+    String? messageId,
+    String? name,
+    Value<DateTime?> createdAt = const Value.absent(),
+    Value<String?> addedBy = const Value.absent(),
+    Value<String?> addedByTag = const Value.absent(),
+  }) => MessageTagRow(
+    messageId: messageId ?? this.messageId,
+    name: name ?? this.name,
+    createdAt: createdAt.present ? createdAt.value : this.createdAt,
+    addedBy: addedBy.present ? addedBy.value : this.addedBy,
+    addedByTag: addedByTag.present ? addedByTag.value : this.addedByTag,
+  );
+  MessageTagRow copyWithCompanion(MessageTagsCompanion data) {
+    return MessageTagRow(
+      messageId: data.messageId.present ? data.messageId.value : this.messageId,
+      name: data.name.present ? data.name.value : this.name,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      addedBy: data.addedBy.present ? data.addedBy.value : this.addedBy,
+      addedByTag: data.addedByTag.present
+          ? data.addedByTag.value
+          : this.addedByTag,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageTagRow(')
+          ..write('messageId: $messageId, ')
+          ..write('name: $name, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('addedBy: $addedBy, ')
+          ..write('addedByTag: $addedByTag')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(messageId, name, createdAt, addedBy, addedByTag);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MessageTagRow &&
+          other.messageId == this.messageId &&
+          other.name == this.name &&
+          other.createdAt == this.createdAt &&
+          other.addedBy == this.addedBy &&
+          other.addedByTag == this.addedByTag);
+}
+
+class MessageTagsCompanion extends UpdateCompanion<MessageTagRow> {
+  final Value<String> messageId;
+  final Value<String> name;
+  final Value<DateTime?> createdAt;
+  final Value<String?> addedBy;
+  final Value<String?> addedByTag;
+  final Value<int> rowid;
+  const MessageTagsCompanion({
+    this.messageId = const Value.absent(),
+    this.name = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.addedBy = const Value.absent(),
+    this.addedByTag = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MessageTagsCompanion.insert({
+    required String messageId,
+    required String name,
+    this.createdAt = const Value.absent(),
+    this.addedBy = const Value.absent(),
+    this.addedByTag = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : messageId = Value(messageId),
+       name = Value(name);
+  static Insertable<MessageTagRow> custom({
+    Expression<String>? messageId,
+    Expression<String>? name,
+    Expression<DateTime>? createdAt,
+    Expression<String>? addedBy,
+    Expression<String>? addedByTag,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (messageId != null) 'message_id': messageId,
+      if (name != null) 'name': name,
+      if (createdAt != null) 'created_at': createdAt,
+      if (addedBy != null) 'added_by': addedBy,
+      if (addedByTag != null) 'added_by_tag': addedByTag,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MessageTagsCompanion copyWith({
+    Value<String>? messageId,
+    Value<String>? name,
+    Value<DateTime?>? createdAt,
+    Value<String?>? addedBy,
+    Value<String?>? addedByTag,
+    Value<int>? rowid,
+  }) {
+    return MessageTagsCompanion(
+      messageId: messageId ?? this.messageId,
+      name: name ?? this.name,
+      createdAt: createdAt ?? this.createdAt,
+      addedBy: addedBy ?? this.addedBy,
+      addedByTag: addedByTag ?? this.addedByTag,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (messageId.present) {
+      map['message_id'] = Variable<String>(messageId.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (addedBy.present) {
+      map['added_by'] = Variable<String>(addedBy.value);
+    }
+    if (addedByTag.present) {
+      map['added_by_tag'] = Variable<String>(addedByTag.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageTagsCompanion(')
+          ..write('messageId: $messageId, ')
+          ..write('name: $name, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('addedBy: $addedBy, ')
+          ..write('addedByTag: $addedByTag, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $ParticipantProfilesTable extends ParticipantProfiles
+    with TableInfo<$ParticipantProfilesTable, ParticipantProfileRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ParticipantProfilesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _uidMeta = const VerificationMeta('uid');
+  @override
+  late final GeneratedColumn<String> uid = GeneratedColumn<String>(
+    'uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _userTagMeta = const VerificationMeta(
+    'userTag',
+  );
+  @override
+  late final GeneratedColumn<String> userTag = GeneratedColumn<String>(
+    'user_tag',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _displayNameMeta = const VerificationMeta(
+    'displayName',
+  );
+  @override
+  late final GeneratedColumn<String> displayName = GeneratedColumn<String>(
+    'display_name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _isBotMeta = const VerificationMeta('isBot');
+  @override
+  late final GeneratedColumn<bool> isBot = GeneratedColumn<bool>(
+    'is_bot',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_bot" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [uid, userTag, displayName, isBot];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'participant_profiles';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ParticipantProfileRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('uid')) {
+      context.handle(
+        _uidMeta,
+        uid.isAcceptableOrUnknown(data['uid']!, _uidMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_uidMeta);
+    }
+    if (data.containsKey('user_tag')) {
+      context.handle(
+        _userTagMeta,
+        userTag.isAcceptableOrUnknown(data['user_tag']!, _userTagMeta),
+      );
+    }
+    if (data.containsKey('display_name')) {
+      context.handle(
+        _displayNameMeta,
+        displayName.isAcceptableOrUnknown(
+          data['display_name']!,
+          _displayNameMeta,
+        ),
+      );
+    }
+    if (data.containsKey('is_bot')) {
+      context.handle(
+        _isBotMeta,
+        isBot.isAcceptableOrUnknown(data['is_bot']!, _isBotMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {uid};
+  @override
+  ParticipantProfileRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ParticipantProfileRow(
+      uid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}uid'],
+      )!,
+      userTag: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_tag'],
+      ),
+      displayName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}display_name'],
+      ),
+      isBot: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_bot'],
+      )!,
+    );
+  }
+
+  @override
+  $ParticipantProfilesTable createAlias(String alias) {
+    return $ParticipantProfilesTable(attachedDatabase, alias);
+  }
+}
+
+class ParticipantProfileRow extends DataClass
+    implements Insertable<ParticipantProfileRow> {
+  final String uid;
+  final String? userTag;
+  final String? displayName;
+  final bool isBot;
+  const ParticipantProfileRow({
+    required this.uid,
+    this.userTag,
+    this.displayName,
+    required this.isBot,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['uid'] = Variable<String>(uid);
+    if (!nullToAbsent || userTag != null) {
+      map['user_tag'] = Variable<String>(userTag);
+    }
+    if (!nullToAbsent || displayName != null) {
+      map['display_name'] = Variable<String>(displayName);
+    }
+    map['is_bot'] = Variable<bool>(isBot);
+    return map;
+  }
+
+  ParticipantProfilesCompanion toCompanion(bool nullToAbsent) {
+    return ParticipantProfilesCompanion(
+      uid: Value(uid),
+      userTag: userTag == null && nullToAbsent
+          ? const Value.absent()
+          : Value(userTag),
+      displayName: displayName == null && nullToAbsent
+          ? const Value.absent()
+          : Value(displayName),
+      isBot: Value(isBot),
+    );
+  }
+
+  factory ParticipantProfileRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ParticipantProfileRow(
+      uid: serializer.fromJson<String>(json['uid']),
+      userTag: serializer.fromJson<String?>(json['userTag']),
+      displayName: serializer.fromJson<String?>(json['displayName']),
+      isBot: serializer.fromJson<bool>(json['isBot']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'uid': serializer.toJson<String>(uid),
+      'userTag': serializer.toJson<String?>(userTag),
+      'displayName': serializer.toJson<String?>(displayName),
+      'isBot': serializer.toJson<bool>(isBot),
+    };
+  }
+
+  ParticipantProfileRow copyWith({
+    String? uid,
+    Value<String?> userTag = const Value.absent(),
+    Value<String?> displayName = const Value.absent(),
+    bool? isBot,
+  }) => ParticipantProfileRow(
+    uid: uid ?? this.uid,
+    userTag: userTag.present ? userTag.value : this.userTag,
+    displayName: displayName.present ? displayName.value : this.displayName,
+    isBot: isBot ?? this.isBot,
+  );
+  ParticipantProfileRow copyWithCompanion(ParticipantProfilesCompanion data) {
+    return ParticipantProfileRow(
+      uid: data.uid.present ? data.uid.value : this.uid,
+      userTag: data.userTag.present ? data.userTag.value : this.userTag,
+      displayName: data.displayName.present
+          ? data.displayName.value
+          : this.displayName,
+      isBot: data.isBot.present ? data.isBot.value : this.isBot,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ParticipantProfileRow(')
+          ..write('uid: $uid, ')
+          ..write('userTag: $userTag, ')
+          ..write('displayName: $displayName, ')
+          ..write('isBot: $isBot')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(uid, userTag, displayName, isBot);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ParticipantProfileRow &&
+          other.uid == this.uid &&
+          other.userTag == this.userTag &&
+          other.displayName == this.displayName &&
+          other.isBot == this.isBot);
+}
+
+class ParticipantProfilesCompanion
+    extends UpdateCompanion<ParticipantProfileRow> {
+  final Value<String> uid;
+  final Value<String?> userTag;
+  final Value<String?> displayName;
+  final Value<bool> isBot;
+  final Value<int> rowid;
+  const ParticipantProfilesCompanion({
+    this.uid = const Value.absent(),
+    this.userTag = const Value.absent(),
+    this.displayName = const Value.absent(),
+    this.isBot = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ParticipantProfilesCompanion.insert({
+    required String uid,
+    this.userTag = const Value.absent(),
+    this.displayName = const Value.absent(),
+    this.isBot = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : uid = Value(uid);
+  static Insertable<ParticipantProfileRow> custom({
+    Expression<String>? uid,
+    Expression<String>? userTag,
+    Expression<String>? displayName,
+    Expression<bool>? isBot,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (uid != null) 'uid': uid,
+      if (userTag != null) 'user_tag': userTag,
+      if (displayName != null) 'display_name': displayName,
+      if (isBot != null) 'is_bot': isBot,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ParticipantProfilesCompanion copyWith({
+    Value<String>? uid,
+    Value<String?>? userTag,
+    Value<String?>? displayName,
+    Value<bool>? isBot,
+    Value<int>? rowid,
+  }) {
+    return ParticipantProfilesCompanion(
+      uid: uid ?? this.uid,
+      userTag: userTag ?? this.userTag,
+      displayName: displayName ?? this.displayName,
+      isBot: isBot ?? this.isBot,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (uid.present) {
+      map['uid'] = Variable<String>(uid.value);
+    }
+    if (userTag.present) {
+      map['user_tag'] = Variable<String>(userTag.value);
+    }
+    if (displayName.present) {
+      map['display_name'] = Variable<String>(displayName.value);
+    }
+    if (isBot.present) {
+      map['is_bot'] = Variable<bool>(isBot.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ParticipantProfilesCompanion(')
+          ..write('uid: $uid, ')
+          ..write('userTag: $userTag, ')
+          ..write('displayName: $displayName, ')
+          ..write('isBot: $isBot, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1978,6 +3099,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $ReplyEdgesTable replyEdges = $ReplyEdgesTable(this);
   late final $StitchEdgesTable stitchEdges = $StitchEdgesTable(this);
   late final $RecipientEdgesTable recipientEdges = $RecipientEdgesTable(this);
+  late final $MessageTagsTable messageTags = $MessageTagsTable(this);
+  late final $ParticipantProfilesTable participantProfiles =
+      $ParticipantProfilesTable(this);
   late final $ColumnsTable columns = $ColumnsTable(this);
   late final $ColumnBranchPointersTable columnBranchPointers =
       $ColumnBranchPointersTable(this);
@@ -1990,6 +3114,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     replyEdges,
     stitchEdges,
     recipientEdges,
+    messageTags,
+    participantProfiles,
     columns,
     columnBranchPointers,
   ];
@@ -2032,6 +3158,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     ),
     WritePropagation(
       on: TableUpdateQuery.onTableName(
+        'messages',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('message_tags', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
         'columns',
         limitUpdateKind: UpdateKind.delete,
       ),
@@ -2065,6 +3198,9 @@ typedef $$MessagesTableCreateCompanionBuilder =
       required String content,
       Value<String?> gitCommit,
       Value<DateTime?> createdAt,
+      Value<String?> cloudMessageId,
+      Value<CloudSyncStatus> syncStatus,
+      Value<String?> syncError,
       Value<int> rowid,
     });
 typedef $$MessagesTableUpdateCompanionBuilder =
@@ -2075,6 +3211,9 @@ typedef $$MessagesTableUpdateCompanionBuilder =
       Value<String> content,
       Value<String?> gitCommit,
       Value<DateTime?> createdAt,
+      Value<String?> cloudMessageId,
+      Value<CloudSyncStatus> syncStatus,
+      Value<String?> syncError,
       Value<int> rowid,
     });
 
@@ -2167,6 +3306,24 @@ final class $$MessagesTableReferences
     ).filter((f) => f.messageId.id.sqlEquals($_itemColumn<String>('id')!));
 
     final cache = $_typedResult.readTableOrNull(_recipientEdgesRefsTable($_db));
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+
+  static MultiTypedResultKey<$MessageTagsTable, List<MessageTagRow>>
+  _messageTagsRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.messageTags,
+    aliasName: 'messages__id__message_tags__message_id',
+  );
+
+  $$MessageTagsTableProcessedTableManager get messageTagsRefs {
+    final manager = $$MessageTagsTableTableManager(
+      $_db,
+      $_db.messageTags,
+    ).filter((f) => f.messageId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_messageTagsRefsTable($_db));
     return ProcessedTableManager(
       manager.$state.copyWith(prefetchedData: cache),
     );
@@ -2276,6 +3433,22 @@ class $$MessagesTableFilterComposer
 
   ColumnFilters<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get cloudMessageId => $composableBuilder(
+    column: $table.cloudMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnWithTypeConverterFilters<CloudSyncStatus, CloudSyncStatus, String>
+  get syncStatus => $composableBuilder(
+    column: $table.syncStatus,
+    builder: (column) => ColumnWithTypeConverterFilters(column),
+  );
+
+  ColumnFilters<String> get syncError => $composableBuilder(
+    column: $table.syncError,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2404,6 +3577,31 @@ class $$MessagesTableFilterComposer
     return f(composer);
   }
 
+  Expression<bool> messageTagsRefs(
+    Expression<bool> Function($$MessageTagsTableFilterComposer f) f,
+  ) {
+    final $$MessageTagsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.messageTags,
+      getReferencedColumn: (t) => t.messageId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MessageTagsTableFilterComposer(
+            $db: $db,
+            $table: $db.messageTags,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
   Expression<bool> columnsRefs(
     Expression<bool> Function($$ColumnsTableFilterComposer f) f,
   ) {
@@ -2518,6 +3716,21 @@ class $$MessagesTableOrderingComposer
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get cloudMessageId => $composableBuilder(
+    column: $table.cloudMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get syncStatus => $composableBuilder(
+    column: $table.syncStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get syncError => $composableBuilder(
+    column: $table.syncError,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$MessagesTableAnnotationComposer
@@ -2546,6 +3759,20 @@ class $$MessagesTableAnnotationComposer
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get cloudMessageId => $composableBuilder(
+    column: $table.cloudMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumnWithTypeConverter<CloudSyncStatus, String> get syncStatus =>
+      $composableBuilder(
+        column: $table.syncStatus,
+        builder: (column) => column,
+      );
+
+  GeneratedColumn<String> get syncError =>
+      $composableBuilder(column: $table.syncError, builder: (column) => column);
 
   Expression<T> replyEdgesAsParent<T extends Object>(
     Expression<T> Function($$ReplyEdgesTableAnnotationComposer a) f,
@@ -2672,6 +3899,31 @@ class $$MessagesTableAnnotationComposer
     return f(composer);
   }
 
+  Expression<T> messageTagsRefs<T extends Object>(
+    Expression<T> Function($$MessageTagsTableAnnotationComposer a) f,
+  ) {
+    final $$MessageTagsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.messageTags,
+      getReferencedColumn: (t) => t.messageId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MessageTagsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.messageTags,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
   Expression<T> columnsRefs<T extends Object>(
     Expression<T> Function($$ColumnsTableAnnotationComposer a) f,
   ) {
@@ -2769,6 +4021,7 @@ class $$MessagesTableTableManager
             bool stitchEdgesAsFrom,
             bool stitchEdgesAsTo,
             bool recipientEdgesRefs,
+            bool messageTagsRefs,
             bool columnsRefs,
             bool branchPointersAsParent,
             bool branchPointersAsChild,
@@ -2793,6 +4046,9 @@ class $$MessagesTableTableManager
                 Value<String> content = const Value.absent(),
                 Value<String?> gitCommit = const Value.absent(),
                 Value<DateTime?> createdAt = const Value.absent(),
+                Value<String?> cloudMessageId = const Value.absent(),
+                Value<CloudSyncStatus> syncStatus = const Value.absent(),
+                Value<String?> syncError = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 id: id,
@@ -2801,6 +4057,9 @@ class $$MessagesTableTableManager
                 content: content,
                 gitCommit: gitCommit,
                 createdAt: createdAt,
+                cloudMessageId: cloudMessageId,
+                syncStatus: syncStatus,
+                syncError: syncError,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2811,6 +4070,9 @@ class $$MessagesTableTableManager
                 required String content,
                 Value<String?> gitCommit = const Value.absent(),
                 Value<DateTime?> createdAt = const Value.absent(),
+                Value<String?> cloudMessageId = const Value.absent(),
+                Value<CloudSyncStatus> syncStatus = const Value.absent(),
+                Value<String?> syncError = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 id: id,
@@ -2819,6 +4081,9 @@ class $$MessagesTableTableManager
                 content: content,
                 gitCommit: gitCommit,
                 createdAt: createdAt,
+                cloudMessageId: cloudMessageId,
+                syncStatus: syncStatus,
+                syncError: syncError,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -2836,6 +4101,7 @@ class $$MessagesTableTableManager
                 stitchEdgesAsFrom = false,
                 stitchEdgesAsTo = false,
                 recipientEdgesRefs = false,
+                messageTagsRefs = false,
                 columnsRefs = false,
                 branchPointersAsParent = false,
                 branchPointersAsChild = false,
@@ -2848,6 +4114,7 @@ class $$MessagesTableTableManager
                     if (stitchEdgesAsFrom) db.stitchEdges,
                     if (stitchEdgesAsTo) db.stitchEdges,
                     if (recipientEdgesRefs) db.recipientEdges,
+                    if (messageTagsRefs) db.messageTags,
                     if (columnsRefs) db.columns,
                     if (branchPointersAsParent) db.columnBranchPointers,
                     if (branchPointersAsChild) db.columnBranchPointers,
@@ -2960,6 +4227,27 @@ class $$MessagesTableTableManager
                               ),
                           typedResults: items,
                         ),
+                      if (messageTagsRefs)
+                        await $_getPrefetchedData<
+                          MessageRow,
+                          $MessagesTable,
+                          MessageTagRow
+                        >(
+                          currentTable: table,
+                          referencedTable: $$MessagesTableReferences
+                              ._messageTagsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$MessagesTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).messageTagsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.messageId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
                       if (columnsRefs)
                         await $_getPrefetchedData<
                           MessageRow,
@@ -3049,6 +4337,7 @@ typedef $$MessagesTableProcessedTableManager =
         bool stitchEdgesAsFrom,
         bool stitchEdgesAsTo,
         bool recipientEdgesRefs,
+        bool messageTagsRefs,
         bool columnsRefs,
         bool branchPointersAsParent,
         bool branchPointersAsChild,
@@ -3810,6 +5099,11 @@ typedef $$RecipientEdgesTableCreateCompanionBuilder =
       required String messageId,
       required String recipientId,
       required RecipientKind kind,
+      Value<bool> isCloudBot,
+      Value<bool> isPublic,
+      Value<bool> notify,
+      Value<String?> addedBy,
+      Value<DateTime?> addedAt,
       Value<int> rowid,
     });
 typedef $$RecipientEdgesTableUpdateCompanionBuilder =
@@ -3817,6 +5111,11 @@ typedef $$RecipientEdgesTableUpdateCompanionBuilder =
       Value<String> messageId,
       Value<String> recipientId,
       Value<RecipientKind> kind,
+      Value<bool> isCloudBot,
+      Value<bool> isPublic,
+      Value<bool> notify,
+      Value<String?> addedBy,
+      Value<DateTime?> addedAt,
       Value<int> rowid,
     });
 
@@ -3866,6 +5165,31 @@ class $$RecipientEdgesTableFilterComposer
     builder: (column) => ColumnWithTypeConverterFilters(column),
   );
 
+  ColumnFilters<bool> get isCloudBot => $composableBuilder(
+    column: $table.isCloudBot,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isPublic => $composableBuilder(
+    column: $table.isPublic,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get notify => $composableBuilder(
+    column: $table.notify,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get addedBy => $composableBuilder(
+    column: $table.addedBy,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get addedAt => $composableBuilder(
+    column: $table.addedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
   $$MessagesTableFilterComposer get messageId {
     final $$MessagesTableFilterComposer composer = $composerBuilder(
       composer: this,
@@ -3909,6 +5233,31 @@ class $$RecipientEdgesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get isCloudBot => $composableBuilder(
+    column: $table.isCloudBot,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isPublic => $composableBuilder(
+    column: $table.isPublic,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get notify => $composableBuilder(
+    column: $table.notify,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get addedBy => $composableBuilder(
+    column: $table.addedBy,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get addedAt => $composableBuilder(
+    column: $table.addedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$MessagesTableOrderingComposer get messageId {
     final $$MessagesTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -3949,6 +5298,23 @@ class $$RecipientEdgesTableAnnotationComposer
 
   GeneratedColumnWithTypeConverter<RecipientKind, String> get kind =>
       $composableBuilder(column: $table.kind, builder: (column) => column);
+
+  GeneratedColumn<bool> get isCloudBot => $composableBuilder(
+    column: $table.isCloudBot,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get isPublic =>
+      $composableBuilder(column: $table.isPublic, builder: (column) => column);
+
+  GeneratedColumn<bool> get notify =>
+      $composableBuilder(column: $table.notify, builder: (column) => column);
+
+  GeneratedColumn<String> get addedBy =>
+      $composableBuilder(column: $table.addedBy, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get addedAt =>
+      $composableBuilder(column: $table.addedAt, builder: (column) => column);
 
   $$MessagesTableAnnotationComposer get messageId {
     final $$MessagesTableAnnotationComposer composer = $composerBuilder(
@@ -4007,11 +5373,21 @@ class $$RecipientEdgesTableTableManager
                 Value<String> messageId = const Value.absent(),
                 Value<String> recipientId = const Value.absent(),
                 Value<RecipientKind> kind = const Value.absent(),
+                Value<bool> isCloudBot = const Value.absent(),
+                Value<bool> isPublic = const Value.absent(),
+                Value<bool> notify = const Value.absent(),
+                Value<String?> addedBy = const Value.absent(),
+                Value<DateTime?> addedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => RecipientEdgesCompanion(
                 messageId: messageId,
                 recipientId: recipientId,
                 kind: kind,
+                isCloudBot: isCloudBot,
+                isPublic: isPublic,
+                notify: notify,
+                addedBy: addedBy,
+                addedAt: addedAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -4019,11 +5395,21 @@ class $$RecipientEdgesTableTableManager
                 required String messageId,
                 required String recipientId,
                 required RecipientKind kind,
+                Value<bool> isCloudBot = const Value.absent(),
+                Value<bool> isPublic = const Value.absent(),
+                Value<bool> notify = const Value.absent(),
+                Value<String?> addedBy = const Value.absent(),
+                Value<DateTime?> addedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => RecipientEdgesCompanion.insert(
                 messageId: messageId,
                 recipientId: recipientId,
                 kind: kind,
+                isCloudBot: isCloudBot,
+                isPublic: isPublic,
+                notify: notify,
+                addedBy: addedBy,
+                addedAt: addedAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -4093,6 +5479,524 @@ typedef $$RecipientEdgesTableProcessedTableManager =
       (RecipientEdge, $$RecipientEdgesTableReferences),
       RecipientEdge,
       PrefetchHooks Function({bool messageId})
+    >;
+typedef $$MessageTagsTableCreateCompanionBuilder =
+    MessageTagsCompanion Function({
+      required String messageId,
+      required String name,
+      Value<DateTime?> createdAt,
+      Value<String?> addedBy,
+      Value<String?> addedByTag,
+      Value<int> rowid,
+    });
+typedef $$MessageTagsTableUpdateCompanionBuilder =
+    MessageTagsCompanion Function({
+      Value<String> messageId,
+      Value<String> name,
+      Value<DateTime?> createdAt,
+      Value<String?> addedBy,
+      Value<String?> addedByTag,
+      Value<int> rowid,
+    });
+
+final class $$MessageTagsTableReferences
+    extends BaseReferences<_$AppDatabase, $MessageTagsTable, MessageTagRow> {
+  $$MessageTagsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $MessagesTable _messageIdTable(_$AppDatabase db) =>
+      db.messages.createAlias('message_tags__message_id__messages__id');
+
+  $$MessagesTableProcessedTableManager get messageId {
+    final $_column = $_itemColumn<String>('message_id')!;
+
+    final manager = $$MessagesTableTableManager(
+      $_db,
+      $_db.messages,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_messageIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$MessageTagsTableFilterComposer
+    extends Composer<_$AppDatabase, $MessageTagsTable> {
+  $$MessageTagsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get addedBy => $composableBuilder(
+    column: $table.addedBy,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get addedByTag => $composableBuilder(
+    column: $table.addedByTag,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$MessagesTableFilterComposer get messageId {
+    final $$MessagesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.messageId,
+      referencedTable: $db.messages,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MessagesTableFilterComposer(
+            $db: $db,
+            $table: $db.messages,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MessageTagsTableOrderingComposer
+    extends Composer<_$AppDatabase, $MessageTagsTable> {
+  $$MessageTagsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get addedBy => $composableBuilder(
+    column: $table.addedBy,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get addedByTag => $composableBuilder(
+    column: $table.addedByTag,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$MessagesTableOrderingComposer get messageId {
+    final $$MessagesTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.messageId,
+      referencedTable: $db.messages,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MessagesTableOrderingComposer(
+            $db: $db,
+            $table: $db.messages,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MessageTagsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MessageTagsTable> {
+  $$MessageTagsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get addedBy =>
+      $composableBuilder(column: $table.addedBy, builder: (column) => column);
+
+  GeneratedColumn<String> get addedByTag => $composableBuilder(
+    column: $table.addedByTag,
+    builder: (column) => column,
+  );
+
+  $$MessagesTableAnnotationComposer get messageId {
+    final $$MessagesTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.messageId,
+      referencedTable: $db.messages,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MessagesTableAnnotationComposer(
+            $db: $db,
+            $table: $db.messages,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MessageTagsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $MessageTagsTable,
+          MessageTagRow,
+          $$MessageTagsTableFilterComposer,
+          $$MessageTagsTableOrderingComposer,
+          $$MessageTagsTableAnnotationComposer,
+          $$MessageTagsTableCreateCompanionBuilder,
+          $$MessageTagsTableUpdateCompanionBuilder,
+          (MessageTagRow, $$MessageTagsTableReferences),
+          MessageTagRow,
+          PrefetchHooks Function({bool messageId})
+        > {
+  $$MessageTagsTableTableManager(_$AppDatabase db, $MessageTagsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MessageTagsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MessageTagsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MessageTagsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> messageId = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<DateTime?> createdAt = const Value.absent(),
+                Value<String?> addedBy = const Value.absent(),
+                Value<String?> addedByTag = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageTagsCompanion(
+                messageId: messageId,
+                name: name,
+                createdAt: createdAt,
+                addedBy: addedBy,
+                addedByTag: addedByTag,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String messageId,
+                required String name,
+                Value<DateTime?> createdAt = const Value.absent(),
+                Value<String?> addedBy = const Value.absent(),
+                Value<String?> addedByTag = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageTagsCompanion.insert(
+                messageId: messageId,
+                name: name,
+                createdAt: createdAt,
+                addedBy: addedBy,
+                addedByTag: addedByTag,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable(table),
+                  $$MessageTagsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({messageId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (messageId) {
+                      state =
+                          state.withJoin(
+                                currentTable: table,
+                                currentColumn: table.messageId,
+                                referencedTable: $$MessageTagsTableReferences
+                                    ._messageIdTable(db),
+                                referencedColumn: $$MessageTagsTableReferences
+                                    ._messageIdTable(db)
+                                    .id,
+                              )
+                              as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$MessageTagsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $MessageTagsTable,
+      MessageTagRow,
+      $$MessageTagsTableFilterComposer,
+      $$MessageTagsTableOrderingComposer,
+      $$MessageTagsTableAnnotationComposer,
+      $$MessageTagsTableCreateCompanionBuilder,
+      $$MessageTagsTableUpdateCompanionBuilder,
+      (MessageTagRow, $$MessageTagsTableReferences),
+      MessageTagRow,
+      PrefetchHooks Function({bool messageId})
+    >;
+typedef $$ParticipantProfilesTableCreateCompanionBuilder =
+    ParticipantProfilesCompanion Function({
+      required String uid,
+      Value<String?> userTag,
+      Value<String?> displayName,
+      Value<bool> isBot,
+      Value<int> rowid,
+    });
+typedef $$ParticipantProfilesTableUpdateCompanionBuilder =
+    ParticipantProfilesCompanion Function({
+      Value<String> uid,
+      Value<String?> userTag,
+      Value<String?> displayName,
+      Value<bool> isBot,
+      Value<int> rowid,
+    });
+
+class $$ParticipantProfilesTableFilterComposer
+    extends Composer<_$AppDatabase, $ParticipantProfilesTable> {
+  $$ParticipantProfilesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get uid => $composableBuilder(
+    column: $table.uid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get userTag => $composableBuilder(
+    column: $table.userTag,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isBot => $composableBuilder(
+    column: $table.isBot,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$ParticipantProfilesTableOrderingComposer
+    extends Composer<_$AppDatabase, $ParticipantProfilesTable> {
+  $$ParticipantProfilesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get uid => $composableBuilder(
+    column: $table.uid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get userTag => $composableBuilder(
+    column: $table.userTag,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isBot => $composableBuilder(
+    column: $table.isBot,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$ParticipantProfilesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $ParticipantProfilesTable> {
+  $$ParticipantProfilesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get uid =>
+      $composableBuilder(column: $table.uid, builder: (column) => column);
+
+  GeneratedColumn<String> get userTag =>
+      $composableBuilder(column: $table.userTag, builder: (column) => column);
+
+  GeneratedColumn<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get isBot =>
+      $composableBuilder(column: $table.isBot, builder: (column) => column);
+}
+
+class $$ParticipantProfilesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $ParticipantProfilesTable,
+          ParticipantProfileRow,
+          $$ParticipantProfilesTableFilterComposer,
+          $$ParticipantProfilesTableOrderingComposer,
+          $$ParticipantProfilesTableAnnotationComposer,
+          $$ParticipantProfilesTableCreateCompanionBuilder,
+          $$ParticipantProfilesTableUpdateCompanionBuilder,
+          (
+            ParticipantProfileRow,
+            BaseReferences<
+              _$AppDatabase,
+              $ParticipantProfilesTable,
+              ParticipantProfileRow
+            >,
+          ),
+          ParticipantProfileRow,
+          PrefetchHooks Function()
+        > {
+  $$ParticipantProfilesTableTableManager(
+    _$AppDatabase db,
+    $ParticipantProfilesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$ParticipantProfilesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$ParticipantProfilesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$ParticipantProfilesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> uid = const Value.absent(),
+                Value<String?> userTag = const Value.absent(),
+                Value<String?> displayName = const Value.absent(),
+                Value<bool> isBot = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ParticipantProfilesCompanion(
+                uid: uid,
+                userTag: userTag,
+                displayName: displayName,
+                isBot: isBot,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String uid,
+                Value<String?> userTag = const Value.absent(),
+                Value<String?> displayName = const Value.absent(),
+                Value<bool> isBot = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ParticipantProfilesCompanion.insert(
+                uid: uid,
+                userTag: userTag,
+                displayName: displayName,
+                isBot: isBot,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$ParticipantProfilesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $ParticipantProfilesTable,
+      ParticipantProfileRow,
+      $$ParticipantProfilesTableFilterComposer,
+      $$ParticipantProfilesTableOrderingComposer,
+      $$ParticipantProfilesTableAnnotationComposer,
+      $$ParticipantProfilesTableCreateCompanionBuilder,
+      $$ParticipantProfilesTableUpdateCompanionBuilder,
+      (
+        ParticipantProfileRow,
+        BaseReferences<
+          _$AppDatabase,
+          $ParticipantProfilesTable,
+          ParticipantProfileRow
+        >,
+      ),
+      ParticipantProfileRow,
+      PrefetchHooks Function()
     >;
 typedef $$ColumnsTableCreateCompanionBuilder =
     ColumnsCompanion Function({
@@ -5007,6 +6911,10 @@ class $AppDatabaseManager {
       $$StitchEdgesTableTableManager(_db, _db.stitchEdges);
   $$RecipientEdgesTableTableManager get recipientEdges =>
       $$RecipientEdgesTableTableManager(_db, _db.recipientEdges);
+  $$MessageTagsTableTableManager get messageTags =>
+      $$MessageTagsTableTableManager(_db, _db.messageTags);
+  $$ParticipantProfilesTableTableManager get participantProfiles =>
+      $$ParticipantProfilesTableTableManager(_db, _db.participantProfiles);
   $$ColumnsTableTableManager get columns =>
       $$ColumnsTableTableManager(_db, _db.columns);
   $$ColumnBranchPointersTableTableManager get columnBranchPointers =>

@@ -95,9 +95,9 @@ The adapter and runtime together decide *how to respond* — the rest is product
 
 #### Cloud-based Interaction
 - Bridge handles responses in-process with arbitrarily finite response time; human responses aren't instantaneous, and conceptually neither are model responses.
-- Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). TBD: good UI representations for cloud vs. locally _registered_, plus common cross-cutting cases (cloud-backed response generation, local response gen + external tooling, fully local, simply human, etc) and a coherent, comprehensive definition on the user level (to be advertised by the bot registry for bots registered locally, or otherwise inferred from cloud user attributes including `is-bot`).
-- Before authenticating: interact with local models, access _public_ cloud messages from cloud users.
-- After authenticating: access private messages, post to other cloud users, sync local-bot interactions with cloud backend.
+- Each user on the platform may be a bot or a human, local or cloud-backed, able to access external tools (including through MCP servers registered with Stitch). Desktop UI uses ☁️ / 💻 badges for cloud vs bot identity when signed in (see [docs/cloud-sync.md](./docs/cloud-sync.md)).
+- Before authenticating: local models and local graph only; no cloud notify, WS, or mention search.
+- After authenticating: notify cloud recipients via `POST /v1/messages`, inbound notifications on `/ws/v1`, explicit sync ledger on local rows (no login backfill of arbitrary history; forward-only create + WS, plus refresh reconcile of edges for synced messages on the visible branch). **Notify failure blocks send**; sync state is visible on messages and columns.
 
 #### Error Handling
 - All user-facing errors route through a single `NotificationService` (`lib/core/notifications/`) rather than ad-hoc `errorMessage` state on ViewModels.

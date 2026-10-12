@@ -9,6 +9,7 @@ import 'core/logging/stitch_env.dart';
 import 'core/logging/stitch_log.dart';
 import 'core/notifications/notification_overlay.dart';
 import 'core/notifications/notification_service.dart';
+import 'core/settings/message_font_service.dart';
 import 'core/settings/theme_service.dart';
 import 'data/repositories/auth_repository.dart';
 import 'data/repositories/drift_column_repository.dart';
@@ -18,7 +19,10 @@ import 'data/services/app_database.dart';
 import 'data/services/auth_api_client.dart';
 import 'data/services/author_id_promotion.dart';
 import 'data/services/bot_bridge_service.dart';
+import 'data/services/cloud_message_api.dart';
+import 'data/services/cloud_user_directory.dart';
 import 'data/services/local_identity_service.dart';
+import 'data/services/stitch_backend_ws_service.dart';
 import 'data/services/mock_hidden_reply_seed.dart';
 import 'data/services/mock_stitch_sibling_seed.dart';
 import 'data/services/mock_typing_seed.dart';
@@ -34,6 +38,7 @@ import 'ui/core/theme/app_theme.dart';
 
 final _pythonProcess = PythonProcessService();
 BotBridgeService? _botBridge;
+StitchBackendWsService? _backendWs;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,6 +49,7 @@ void main() async {
   await StitchLog.initialize(logDir: stitchEnv.logDir, level: stitchEnv.logLevel);
 
   void handleTerminationSignal(_) {
+    _backendWs?.dispose();
     _botBridge?.close();
     _pythonProcess.stop();
     StitchLog.close();
@@ -63,6 +69,9 @@ void main() async {
 
   final themeService = ThemeService();
   await themeService.initialize();
+
+  final messageFontService = MessageFontService();
+  await messageFontService.initialize();
 
   final notificationService = NotificationService();
 
@@ -126,6 +135,9 @@ void main() async {
     StitchLog.info('mock hidden-reply fixtures enabled', tag: 'main');
   }
 
+  final cloudMessageApi = CloudMessageApi(stitchHttp);
+  final cloudUserDirectory = CloudUserDirectory(stitchHttp);
+
   final columnsViewModel = ColumnsViewModel(
     messageRepository,
     columnRepository,
@@ -133,22 +145,37 @@ void main() async {
     identityService,
     botBridge: _botBridge,
     notifications: notificationService,
+    auth: authRepository,
+    cloudMessages: cloudMessageApi,
+    cloudUsers: cloudUserDirectory,
     mockTypingCues: stitchEnv.mockTypingCues,
   );
   await columnsViewModel.initialize();
 
-  Future<void> promoteLocalAuthorship() async {
-    final n = await AuthorIdPromotion.promoteLocalToCloud(
+  _backendWs = StitchBackendWsService(
+    apiBaseUrl: stitchEnv.apiBaseUrl,
+    vault: sessionVault,
+    auth: authRepository,
+    messages: messageRepository,
+    onMessage: columnsViewModel.handleCloudWireMessage,
+  );
+  await _backendWs!.start();
+
+  Future<void> onAuthenticated() async {
+    StitchLog.hop('dart.cloud', 'onAuthenticated → promote + reloadAll');
+    await AuthorIdPromotion.promoteLocalToCloud(
       identity: identityService,
       messages: messageRepository,
     );
-    if (n > 0) await columnsViewModel.reloadAll();
+    // Session restore / login: refresh columns so rewritten author stamps
+    // show, and reconcile reply/stitch edges for synced visible-branch msgs.
+    await columnsViewModel.reloadAll(reason: 'auth');
   }
 
   final loginViewModel = LoginViewModel(
     authRepository: authRepository,
     notifications: notificationService,
-    onAuthenticated: promoteLocalAuthorship,
+    onAuthenticated: onAuthenticated,
   );
   // Soft restore: never block local chat on network. Runs after the local
   // message store is up so a restored session can promote local→cloud
@@ -159,6 +186,7 @@ void main() async {
     columnsViewModel: columnsViewModel,
     notificationService: notificationService,
     themeService: themeService,
+    messageFontService: messageFontService,
     authRepository: authRepository,
     loginViewModel: loginViewModel,
     stitchHttpClient: stitchHttp,
@@ -169,6 +197,7 @@ class StitchApp extends StatefulWidget {
   final ColumnsViewModel columnsViewModel;
   final NotificationService notificationService;
   final ThemeService themeService;
+  final MessageFontService messageFontService;
   final AuthRepository authRepository;
   final LoginViewModel loginViewModel;
   final StitchHttpClient stitchHttpClient;
@@ -178,6 +207,7 @@ class StitchApp extends StatefulWidget {
     required this.columnsViewModel,
     required this.notificationService,
     required this.themeService,
+    required this.messageFontService,
     required this.authRepository,
     required this.loginViewModel,
     required this.stitchHttpClient,
@@ -200,6 +230,7 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
     // deliver on close.
     _lifecycleListener = AppLifecycleListener(
       onExitRequested: () async {
+        await _backendWs?.dispose();
         await _botBridge?.close();
         _pythonProcess.stop();
         await StitchLog.close();
@@ -234,9 +265,14 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
         ChangeNotifierProvider<NotificationService>.value(value: widget.notificationService),
         ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
         ChangeNotifierProvider<ThemeService>.value(value: widget.themeService),
+        ChangeNotifierProvider<MessageFontService>.value(
+          value: widget.messageFontService,
+        ),
         ChangeNotifierProvider<AuthRepository>.value(value: widget.authRepository),
         ChangeNotifierProvider<LoginViewModel>.value(value: widget.loginViewModel),
         Provider<StitchHttpClient>.value(value: widget.stitchHttpClient),
+        Provider<CloudUserDirectory>.value(value: CloudUserDirectory(widget.stitchHttpClient)),
+        Provider<CloudMessageApi>.value(value: CloudMessageApi(widget.stitchHttpClient)),
       ],
       child: Consumer2<ThemeService, AuthRepository>(
         builder: (context, themeService, auth, _) {

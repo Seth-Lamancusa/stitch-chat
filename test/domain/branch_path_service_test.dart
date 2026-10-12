@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:stitch_chat/data/models/cloud_sync_status.dart';
 import 'package:stitch_chat/data/models/message.dart';
+import 'package:stitch_chat/data/models/message_tag.dart';
+import 'package:stitch_chat/data/models/participant_profile.dart';
 import 'package:stitch_chat/data/repositories/column_repository.dart';
 import 'package:stitch_chat/data/repositories/message_repository.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
@@ -12,8 +15,13 @@ class FakeMessageRepository implements MessageRepository {
   final Map<String, List<String>> _stitchChildrenOf = {};
   final Map<String, List<String>> _stitchParentsOf = {};
 
+  /// Optional test hook invoked before the row is stored (e.g. to gate persist).
+  Future<void> Function(Message message)? onSaveMessage;
+
   @override
   Future<void> saveMessage(Message message) async {
+    final hook = onSaveMessage;
+    if (hook != null) await hook(message);
     _messages[message.id] = message;
   }
 
@@ -114,13 +122,70 @@ class FakeMessageRepository implements MessageRepository {
   }
 
   @override
-  Future<void> addRecipientEdge(String messageId, String recipientId, RecipientKind kind) async {}
+  Future<void> addRecipientEdge(
+    String messageId,
+    String recipientId,
+    RecipientKind kind, {
+    bool isCloudBot = false,
+    bool isPublic = true,
+    bool notify = true,
+    String? addedBy,
+    DateTime? addedAt,
+  }) async {}
 
   @override
   Future<List<RecipientRef>> getRecipients(String messageId) async => const [];
 
   @override
+  Future<void> setMessageTags(String messageId, List<MessageTag> tags) async {}
+
+  @override
+  Future<List<MessageTag>> getMessageTags(String messageId) async => const [];
+
+  @override
   Future<void> deleteMessage(String id) async => _messages.remove(id);
+
+  @override
+  Future<String?> resolveGraphMessageId(String cloudOrLocalId) async =>
+      _messages.containsKey(cloudOrLocalId) ? cloudOrLocalId : null;
+
+  @override
+  Future<Message?> getMessageByCloudId(String cloudMessageId) async {
+    for (final m in _messages.values) {
+      if (m.cloudMessageId == cloudMessageId) return m;
+    }
+    return null;
+  }
+
+  @override
+  Future<void> updateCloudSync({
+    required String localMessageId,
+    CloudSyncStatus? syncStatus,
+    String? cloudMessageId,
+    String? syncError,
+  }) async {
+    final existing = _messages[localMessageId];
+    if (existing == null) return;
+    _messages[localMessageId] = Message(
+      id: existing.id,
+      role: existing.role,
+      authorId: existing.authorId,
+      content: existing.content,
+      gitCommit: existing.gitCommit,
+      createdAt: existing.createdAt,
+      isStreaming: existing.isStreaming,
+      isSending: existing.isSending,
+      cloudMessageId: cloudMessageId ?? existing.cloudMessageId,
+      syncStatus: syncStatus ?? existing.syncStatus,
+      syncError: syncError ?? existing.syncError,
+    );
+  }
+
+  @override
+  Future<void> upsertParticipantProfile(ParticipantProfile profile) async {}
+
+  @override
+  Future<ParticipantProfile?> getParticipantProfile(String uid) async => null;
 
   @override
   Future<int> rewriteAuthorId({
@@ -131,14 +196,8 @@ class FakeMessageRepository implements MessageRepository {
     var count = 0;
     for (final entry in _messages.entries.toList()) {
       if (entry.value.authorId == fromAuthorId) {
-        _messages[entry.key] = Message(
-          id: entry.value.id,
-          role: entry.value.role,
+        _messages[entry.key] = entry.value.copyWith(
           authorId: toAuthorId,
-          content: entry.value.content,
-          gitCommit: entry.value.gitCommit,
-          createdAt: entry.value.createdAt,
-          isStreaming: entry.value.isStreaming,
         );
         count++;
       }
