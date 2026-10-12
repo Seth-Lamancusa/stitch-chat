@@ -9,12 +9,11 @@ import '../../core/logging/stitch_log.dart';
 import '../../core/settings/message_font_service.dart';
 import '../../data/models/message.dart';
 import '../../data/services/mock_typing_cue.dart';
-import '../core/adaptive_marker.dart';
-import '../core/incoming_navigator.dart';
-import '../../domain/author_badge_flags.dart';
-import '../composer/draft_highlight_editing_controller.dart';
+import '../../domain/branch_path_service.dart' show Direction;
 import '../composer/mention_composer.dart';
 import '../composer/recipients_pill.dart';
+import '../core/adaptive_marker.dart';
+import '../core/incoming_navigator.dart';
 import '../core/message_card.dart';
 import '../core/outgoing_navigator.dart' show OutgoingNavArrow;
 import '../core/theme/app_colors.dart';
@@ -30,7 +29,7 @@ import 'columns_viewmodel.dart';
 /// constant rather than a repeated literal.
 const double _kMessageRowGap = 2.0;
 
-/// Scrollable space below the end-of-thread marker (after-`center` sliver only).
+/// Room below the last message so the composer doesn't cover the tip.
 const double _kBottomThreadPadding = 400.0;
 
 /// Native folder dialog used by the column cwd editor. Tests replace this
@@ -94,7 +93,7 @@ class ColumnView extends StatefulWidget {
   /// When false, cwd is expected elsewhere (e.g. single-column overlay).
   final bool showCwdInHeader;
 
-  /// Widget tests: skip composer auto-focus (caret tickers break pumpAndSettle).
+  /// Widget tests set this so the composer doesn't steal focus.
   @visibleForTesting
   static bool debugSuppressComposerAutoFocus = false;
 
@@ -103,7 +102,7 @@ class ColumnView extends StatefulWidget {
 }
 
 class _ColumnViewState extends State<ColumnView> {
-  final _controller = DraftHighlightEditingController();
+  final _controller = TextEditingController();
   final _focusNode = FocusNode();
   final _messageListKey = GlobalKey<_MessageListState>();
 
@@ -178,14 +177,9 @@ class _ColumnViewState extends State<ColumnView> {
     final content = _controller.text;
     if (content.trim().isEmpty) return;
 
-    // Start send first so draft recipients/tags are snapshotted (and the
-    // optimistic row appears) before we clear the field. Clearing fires the
-    // draft listener; without a prior snapshot, reconcile against '' drops
-    // autocomplete-staged cloud @mentions (not re-derived from text alone).
-    //
-    // Mid-thread fork: keep the reply parent at a stable viewport Y, same as
-    // sibling Next/Prev ([_MessageListState.navigatePreservingPin]). Snapshot
-    // the pin id before send clears [ColumnUiState.replyingToMessageId].
+    // Snapshot draft recipients before clearing the field. Mid-thread forks
+    // keep the reply parent at a stable viewport Y.
+    vm.retainAuthPromptsAcrossSend(widget.state.id);
     final columnId = widget.state.id;
     final pinParentId = vm.scrollPinParentForSend(columnId);
     final list = _messageListKey.currentState;
@@ -210,14 +204,15 @@ class _ColumnViewState extends State<ColumnView> {
     _controller.addListener(_onDraftChanged);
     _focusNode.requestFocus();
 
-    unawaited(send.then((ok) {
-      if (!mounted || ok) return;
-      // Guard / cloud rollback left draft lists intact — restore the field.
-      _controller.value = TextEditingValue(
-        text: content,
-        selection: TextSelection.collapsed(offset: content.length),
-      );
-    }));
+    unawaited(
+      send.then((ok) {
+        if (!mounted || ok) return;
+        _controller.value = TextEditingValue(
+          text: content,
+          selection: TextSelection.collapsed(offset: content.length),
+        );
+      }),
+    );
   }
 
   @override
@@ -279,6 +274,8 @@ class _ColumnViewState extends State<ColumnView> {
                         onCancelReply: () => vm.setReplyTarget(state.id, null),
                         cwdWarningBotIds: state.cwdWarningBotIds,
                         cwdWarningPhase: state.cwdWarningPhase,
+                        authPrompts: state.authPrompts,
+                        onSignIn: vm.beginBotAuth,
                       ),
                     ),
                 ],
@@ -607,6 +604,11 @@ class _MessageList extends StatefulWidget {
 class _MessageListState extends State<_MessageList> {
   static const Duration _scrollSaveDebounce = Duration(milliseconds: 400);
 
+  // How close to an edge (in pixels) triggers an auto-load of the next
+  // batch — per `docs/plans/message-loading-plan.md` §7's intersection-
+  // observer-style margin.
+  static const double _loadMoreMargin = 200;
+
   final _scrollController = _PinPreservingScrollController();
   bool _initialScrollCorrectionArmed = false;
   Timer? _scrollSaveTimer;
@@ -663,37 +665,20 @@ class _MessageListState extends State<_MessageList> {
     // Measure before [action] while size access is legal. After the pin
     // becomes the center sliver (anchor 0, AxisDirection.down), its top
     // paints at `viewportTop - pixels`, so this target puts it back at
-    // [yBefore]. Prefer applying during layout via [correctPixels] (no
-    // flash); fall back to a post-frame [jumpTo] when [action] awaited
-    // across frames (e.g. mid-thread send) and layout already ran unarmed.
+    // [yBefore]. Applied during layout via [correctPixels] — not a
+    // post-frame [jumpTo] — so there's no one-frame flash.
     final yBefore = _messageTopY(pinMessageId);
     final viewportTop = _viewportTopY();
 
     await action();
     if (!mounted || yBefore == null || viewportTop == null) return;
 
-    // Arm *after* [action] returns: when [notifyListeners] has only marked
-    // the tree dirty, the next layout consumes this before paint. Arming
-    // before the await would risk an intervening frame (during async work)
-    // consuming the pending correction against the still-old branch.
+    // Arm *after* [action] returns: [notifyListeners] has only marked the
+    // tree dirty — the rebuild/layout that consumes this correction hasn't
+    // run yet. Arming before the await would risk an intervening frame
+    // (during the async nav) consuming the pending correction against the
+    // still-old branch.
     _scrollController.armPinPreservation(targetPixels: viewportTop - yBefore);
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return;
-
-    // If a frame during [action] already laid out without the armed
-    // correction, the pin drifted — nudge offset so its top returns to
-    // [yBefore]. No-ops when the layout-time path already won.
-    final yAfter = _messageTopY(pinMessageId);
-    if (yAfter == null || !_scrollController.hasClients) return;
-    final drift = yAfter - yBefore;
-    if (drift.abs() < 0.5) return;
-    final position = _scrollController.position;
-    final target = (position.pixels + drift).clamp(
-      position.minScrollExtent,
-      position.maxScrollExtent,
-    );
-    if ((target - position.pixels).abs() < 0.5) return;
-    position.jumpTo(target);
     await WidgetsBinding.instance.endOfFrame;
   }
 
@@ -728,6 +713,31 @@ class _MessageListState extends State<_MessageList> {
 
   void _onScroll() {
     _scheduleScrollSave();
+    _maybeTriggerLoadMore();
+  }
+
+  // Scroll-proximity auto-trigger for a `waiting` marker: fires
+  // `extendAbove`/`extendBelow` once the viewport comes within
+  // `_loadMoreMargin` of an edge that has more to load. Re-entrancy is
+  // guarded by `topLoading`/`bottomLoading`, which `ColumnsViewModel`
+  // flips synchronously before its first await — so a scroll frame arriving
+  // before the triggered load completes just sees loading == true and
+  // skips.
+  void _maybeTriggerLoadMore() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final state = widget.state;
+    final vm = context.read<ColumnsViewModel>();
+    if (state.topMarker == MarkerVisualState.waiting &&
+        !state.topLoading &&
+        position.pixels - position.minScrollExtent <= _loadMoreMargin) {
+      vm.extendAbove(state.id);
+    }
+    if (state.bottomMarker == MarkerVisualState.waiting &&
+        !state.bottomLoading &&
+        position.maxScrollExtent - position.pixels <= _loadMoreMargin) {
+      vm.extendBelow(state.id);
+    }
   }
 
   // Debounced rather than written on every scroll-notification frame, so a
@@ -763,12 +773,12 @@ class _MessageListState extends State<_MessageList> {
     final persisted = state.initialScrollOffset;
     if (persisted != null) {
       _scrollController.armPinPreservation(targetPixels: persisted);
-      return;
-    }
-
-    if (anchorIndex == 0) {
+    } else if (anchorIndex == 0) {
       _scrollController.armPinPreservation(alignToMinScrollExtent: true);
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _maybeTriggerLoadMore();
+    });
   }
 
   @override
@@ -793,7 +803,7 @@ class _MessageListState extends State<_MessageList> {
     // the row that must stay visually fixed across a fork switch:
     // `navigateOutgoing`/`navigateIncoming` re-anchor it to `parentId`/
     // `childId` respectively — the one row each swap leaves untouched. It's
-    // guaranteed present in `state.rows` because `getFullVisibleBranch`
+    // guaranteed present in `state.rows` because `materializedTrajectory`
     // always builds `[...above, anchor, ...below]` from this same id, and
     // `state.rows` is only non-empty when an anchor exists (see the
     // early-return above).
@@ -841,9 +851,13 @@ class _MessageListState extends State<_MessageList> {
         stitchCount: state.topStitchCount,
         hiddenCount: state.topHiddenCount,
         errorMessage: state.topError,
-        onLoadStitches: () => vm.loadStitchAbove(state.id),
+        onLoadStitches: () => vm.revealStitch(
+          state.id,
+          state.rows.first.message.id,
+          Direction.incoming,
+        ),
         onRevealHidden: () => vm.loadHiddenAbove(state.id),
-        onRetry: () => vm.loadStitchAbove(state.id),
+        onRetry: () => vm.extendAbove(state.id),
       ),
       // Chronological order: oldest at the top of this box. The box sits
       // above `center`, so its last child is the row immediately above
@@ -883,9 +897,13 @@ class _MessageListState extends State<_MessageList> {
         stitchCount: state.bottomStitchCount,
         hiddenCount: state.bottomHiddenCount,
         errorMessage: state.bottomError,
-        onLoadStitches: () => vm.loadStitchBelow(state.id),
+        onLoadStitches: () => vm.revealStitch(
+          state.id,
+          state.rows.last.message.id,
+          Direction.outgoing,
+        ),
         onRevealHidden: () => vm.loadHiddenBelow(state.id),
-        onRetry: () => vm.loadStitchBelow(state.id),
+        onRetry: () => vm.extendBelow(state.id),
       ),
     ];
 
@@ -986,36 +1004,14 @@ class _MessageRow extends StatelessWidget {
         row.message.authorId != null &&
         row.message.authorId == vm.currentUserId;
 
-    final flags = AuthorBadgeFlags.resolve(
-      message: row.message,
-      profile: row.authorProfile,
-      registry: vm.botRegistry,
-    );
-    final authorName = isMe
-        ? 'You'
-        : row.authorProfile?.label ??
-            row.message.authorId ??
-            _defaultAuthorLabel(row.message.role);
+    // Author label
     final authorLabel = Padding(
       padding: const EdgeInsets.only(left: 4, bottom: 4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            authorName,
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-          if (flags.showCloud)
-            const Padding(
-              padding: EdgeInsets.only(left: 4),
-              child: Text('☁️', style: TextStyle(fontSize: 12)),
-            ),
-          if (flags.showLaptop)
-            const Padding(
-              padding: EdgeInsets.only(left: 2),
-              child: Text('💻', style: TextStyle(fontSize: 12)),
-            ),
-        ],
+      child: Text(
+        isMe
+            ? 'You'
+            : row.message.authorId ?? _defaultAuthorLabel(row.message.role),
+        style: const TextStyle(fontWeight: FontWeight.bold),
       ),
     );
 
@@ -1077,57 +1073,54 @@ class _MessageRow extends StatelessWidget {
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 7),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (row.incoming != null)
-            // Mirror image of the sibling case: a parent swap rewrites the
-            // context *above* this message and leaves the message itself in
-            // place, and `navigateIncoming` re-anchors the column's persisted
-            // anchor to this message, so it's picked up as the scroll anchor
-            // automatically.
-            IncomingNavigator(
-              hiddenCount: row.incoming!.hiddenReplyIncoming.length,
-              replyCount: row.incoming!.replyIncoming.length,
-              stitchCount: row.incoming!.stitchedIncoming.length,
-              currentIndex: row.incomingCurrentIndex,
-              onPrev: () => _navigateIncoming(context, forward: false),
-              onNext: () => _navigateIncoming(context, forward: true),
-            ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Author label row — only for the topmost message of a consecutive
-              // same-author run.
-              if (showAuthor)
-                Padding(
-                  padding: const EdgeInsets.only(left: 22, right: 22),
-                  child: authorLabel,
-                ),
-              // Message bubble row with nav buttons
-              IntrinsicHeight(
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 20,
-                      child: leftNav != null ? Center(child: leftNav) : null,
-                    ),
-                    const SizedBox(width: 2),
-                    Expanded(child: bubble),
-                    const SizedBox(width: 2),
-                    SizedBox(
-                      width: 20,
-                      child: rightNav != null ? Center(child: rightNav) : null,
-                    ),
-                  ],
-                ),
-              ),
-            ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (row.incoming != null)
+          // Mirror image of the sibling case: a parent swap rewrites the
+          // context *above* this message and leaves the message itself in
+          // place, and `navigateIncoming` re-anchors the column's persisted
+          // anchor to this message, so it's picked up as the scroll anchor
+          // automatically.
+          IncomingNavigator(
+            hiddenCount: row.incoming!.hiddenReplyIncoming.length,
+            replyCount: row.incoming!.replyIncoming.length,
+            stitchCount: row.incoming!.stitchedIncoming.length,
+            currentIndex: row.incomingCurrentIndex,
+            onPrev: () => _navigateIncoming(context, forward: false),
+            onNext: () => _navigateIncoming(context, forward: true),
           ),
-        ],
-      ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Author label row — only for the topmost message of a consecutive
+            // same-author run.
+            if (showAuthor)
+              Padding(
+                padding: const EdgeInsets.only(left: 22, right: 22),
+                child: authorLabel,
+              ),
+            // Message bubble row with nav buttons
+            IntrinsicHeight(
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 20,
+                    child: leftNav != null ? Center(child: leftNav) : null,
+                  ),
+                  const SizedBox(width: 2),
+                  Expanded(child: bubble),
+                  const SizedBox(width: 2),
+                  SizedBox(
+                    width: 20,
+                    child: rightNav != null ? Center(child: rightNav) : null,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -1156,6 +1149,8 @@ class _Composer extends StatelessWidget {
     this.onCancelReply,
     this.cwdWarningBotIds = const [],
     this.cwdWarningPhase = CwdWarningPhase.none,
+    this.authPrompts = const [],
+    this.onSignIn,
   });
 
   final String columnId;
@@ -1170,6 +1165,8 @@ class _Composer extends StatelessWidget {
   final VoidCallback? onCancelReply;
   final List<String> cwdWarningBotIds;
   final CwdWarningPhase cwdWarningPhase;
+  final List<BotAuthPrompt> authPrompts;
+  final void Function(String botId)? onSignIn;
 
   @override
   Widget build(BuildContext context) {
@@ -1187,6 +1184,7 @@ class _Composer extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _AuthPromptBanner(prompts: authPrompts, onSignIn: onSignIn),
           _CwdWarningBanner(botIds: cwdWarningBotIds, phase: cwdWarningPhase),
           if (replyTarget != null)
             Padding(
@@ -1320,6 +1318,82 @@ class _Composer extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Sign-in prompt for bots that advertise `requires_auth`. Stays until the
+/// bridge reports `authenticated`.
+class _AuthPromptBanner extends StatelessWidget {
+  const _AuthPromptBanner({required this.prompts, this.onSignIn});
+
+  final List<BotAuthPrompt> prompts;
+  final void Function(String botId)? onSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    if (prompts.isEmpty) return const SizedBox.shrink();
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final prompt in prompts)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.lock_outline,
+                    size: 16,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(child: _AuthPromptBody(prompt: prompt)),
+                  if (prompt.state == 'unauthenticated')
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: TextButton(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        onPressed: onSignIn == null
+                            ? null
+                            : () => onSignIn!(prompt.botId),
+                        child: const Text('Sign in'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuthPromptBody extends StatelessWidget {
+  const _AuthPromptBody({required this.prompt});
+
+  final BotAuthPrompt prompt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final style = TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant);
+    final tag = '@${prompt.botId}';
+    switch (prompt.state) {
+      case 'pending':
+        return Text('Signing in to $tag…', style: style);
+      case 'unavailable':
+        return Text(
+          prompt.detail ?? 'This bot is not available in this build.',
+          style: style,
+        );
+      default:
+        return Text('Sign in to $tag to get a reply.', style: style);
+    }
   }
 }
 

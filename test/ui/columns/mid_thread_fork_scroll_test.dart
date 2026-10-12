@@ -15,6 +15,7 @@ import 'package:stitch_chat/data/services/local_identity_service.dart';
 import 'package:stitch_chat/data/services/session_vault.dart';
 import 'package:stitch_chat/data/services/stitch_http_client.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 import 'package:stitch_chat/ui/auth/login_viewmodel.dart';
 import 'package:stitch_chat/ui/columns/column_view.dart';
 import 'package:stitch_chat/ui/columns/columns_view.dart';
@@ -33,9 +34,16 @@ class _LongIdColumnRepository implements ColumnRepository {
   int _n = 0;
 
   @override
-  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({
+    String? anchorMessageId,
+    double? width,
+  }) async {
     final id = 'longcolid-${_n++}';
-    final meta = ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
+    final meta = ColumnMeta(
+      id: id,
+      anchorMessageId: anchorMessageId,
+      width: width,
+    );
     _columns[id] = meta;
     return meta;
   }
@@ -146,18 +154,13 @@ class _Identity implements LocalIdentityService {
   void dispose() {}
 }
 
-Message _msg(
-  String id, {
-  String content = '',
-  DateTime? createdAt,
-}) =>
-    Message(
-      id: id,
-      role: MessageRole.user,
-      authorId: 'me',
-      content: content,
-      createdAt: createdAt ?? DateTime.utc(2024, 1, 1),
-    );
+Message _msg(String id, {String content = '', DateTime? createdAt}) => Message(
+  id: id,
+  role: MessageRole.user,
+  authorId: 'me',
+  content: content,
+  createdAt: createdAt ?? DateTime.utc(2024, 1, 1),
+);
 
 void main() {
   late FakeMessageRepository messages;
@@ -176,16 +179,22 @@ void main() {
       notifications: NotificationService(),
     );
     messageFontService = await createTestMessageFontService();
+    final store = MessageStore(messages);
     vm = ColumnsViewModel(
       messages,
       columns,
-      BranchPathService(messages, columns),
+      BranchPathService(messages, columns, store),
+      store,
       _Identity(),
     );
 
     await messages.saveMessage(_msg('fork0001', content: 'fork parent'));
     await messages.saveMessage(
-      _msg('child-a1', content: 'branch A', createdAt: DateTime.utc(2024, 1, 2)),
+      _msg(
+        'child-a1',
+        content: 'branch A',
+        createdAt: DateTime.utc(2024, 1, 2),
+      ),
     );
     await messages.saveMessage(
       _msg('leaf-a01', content: 'leaf A', createdAt: DateTime.utc(2024, 1, 3)),
@@ -208,20 +217,18 @@ void main() {
   });
 
   List<SingleChildWidget> providers() => [
-        ChangeNotifierProvider<ColumnsViewModel>.value(value: vm),
-        ChangeNotifierProvider<LoginViewModel>.value(value: loginVm),
-        ChangeNotifierProvider<MessageFontService>.value(
-          value: messageFontService,
+    ChangeNotifierProvider<ColumnsViewModel>.value(value: vm),
+    ChangeNotifierProvider<LoginViewModel>.value(value: loginVm),
+    ChangeNotifierProvider<MessageFontService>.value(value: messageFontService),
+    Provider<CloudUserDirectory>.value(
+      value: CloudUserDirectory(
+        StitchHttpClient(
+          baseUrl: 'http://127.0.0.1:1',
+          vault: InMemorySessionVault(),
         ),
-        Provider<CloudUserDirectory>.value(
-          value: CloudUserDirectory(
-            StitchHttpClient(
-              baseUrl: 'http://127.0.0.1:1',
-              vault: InMemorySessionVault(),
-            ),
-          ),
-        ),
-      ];
+      ),
+    ),
+  ];
 
   test('scrollPinParentForSend is the mid-thread reply parent', () {
     expect(vm.scrollPinParentForSend(columnId), isNull);
@@ -251,58 +258,59 @@ void main() {
     expect(vm.scrollPinParentForSend(columnId), isNull);
   });
 
-  testWidgets(
-    'mid-thread reply keeps the parent at a stable viewport Y',
-    (tester) async {
-      await tester.pumpWidget(
-        MultiProvider(
-          providers: providers(),
-          child: MaterialApp(
-            theme: AppTheme.light(),
-            home: const Scaffold(
-              body: SizedBox(height: 800, child: ColumnsView()),
-            ),
+  testWidgets('mid-thread reply keeps the parent at a stable viewport Y', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: providers(),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const Scaffold(
+            body: SizedBox(height: 800, child: ColumnsView()),
           ),
         ),
-      );
-      await pumpUiSettle(tester);
+      ),
+    );
+    await pumpUiSettle(tester);
 
-      expect(vm.anchorOf(columnId), 'leaf-a01');
+    expect(vm.anchorOf(columnId), 'leaf-a01');
 
-      double topY(String id) {
-        final box = tester.renderObject(
-          find.byKey(ValueKey(id), skipOffstage: false),
-        ) as RenderBox;
-        return box.localToGlobal(Offset.zero).dy;
-      }
+    double topY(String id) {
+      final box =
+          tester.renderObject(find.byKey(ValueKey(id), skipOffstage: false))
+              as RenderBox;
+      return box.localToGlobal(Offset.zero).dy;
+    }
 
-      final parentFinder =
-          find.byKey(const ValueKey('fork0001'), skipOffstage: false);
-      expect(parentFinder, findsOneWidget);
-      await tester.ensureVisible(parentFinder);
-      await pumpUiSettle(tester);
-      final parentYBefore = topY('fork0001');
+    final parentFinder = find.byKey(
+      const ValueKey('fork0001'),
+      skipOffstage: false,
+    );
+    expect(parentFinder, findsOneWidget);
+    await tester.ensureVisible(parentFinder);
+    await pumpUiSettle(tester);
+    final parentYBefore = topY('fork0001');
 
-      // Reply is hover-chrome; set the target directly, then send via the
-      // composer so [_ColumnViewState._send] runs pin preservation.
-      vm.setReplyTarget(columnId, 'fork0001');
-      await pumpUiSettle(tester);
+    // Reply is hover-chrome; set the target directly, then send via the
+    // composer so [_ColumnViewState._send] runs pin preservation.
+    vm.setReplyTarget(columnId, 'fork0001');
+    await pumpUiSettle(tester);
 
-      await tester.enterText(find.byType(TextField), 'branch B');
-      await tester.tap(find.byIcon(Icons.arrow_upward));
-      // Send is fire-and-forget from the composer; settle twice so the
-      // post-frame pin drift correction inside navigatePreservingPin can run.
-      await pumpUiSettle(tester);
-      await pumpUiSettle(tester);
+    await tester.enterText(find.byType(TextField), 'branch B');
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    // Send is fire-and-forget from the composer; settle twice so the
+    // post-frame pin drift correction inside navigatePreservingPin can run.
+    await pumpUiSettle(tester);
+    await pumpUiSettle(tester);
 
-      expect(vm.anchorOf(columnId), 'fork0001');
-      expect(
-        topY('fork0001'),
-        moreOrLessEquals(parentYBefore, epsilon: 3.0),
-        reason:
-            'Mid-thread fork send must keep the reply parent at the same '
-            'viewport Y after center relocation',
-      );
-    },
-  );
+    expect(vm.anchorOf(columnId), 'fork0001');
+    expect(
+      topY('fork0001'),
+      moreOrLessEquals(parentYBefore, epsilon: 3.0),
+      reason:
+          'Mid-thread fork send must keep the reply parent at the same '
+          'viewport Y after center relocation',
+    );
+  });
 }

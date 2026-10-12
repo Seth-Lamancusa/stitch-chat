@@ -4,25 +4,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:provider/single_child_widget.dart';
-import 'package:stitch_chat/ui/columns/column_view.dart';
 import 'package:stitch_chat/core/notifications/notification_service.dart';
 import 'package:stitch_chat/core/settings/message_font_service.dart';
-import 'package:stitch_chat/data/services/cloud_user_directory.dart';
-import 'package:stitch_chat/data/services/session_vault.dart';
-import 'package:stitch_chat/data/services/stitch_http_client.dart';
 import 'package:stitch_chat/data/models/message.dart';
 import 'package:stitch_chat/data/repositories/auth_repository.dart';
 import 'package:stitch_chat/data/repositories/column_repository.dart';
 import 'package:stitch_chat/data/repositories/fake_auth_repository.dart';
+import 'package:stitch_chat/data/services/cloud_user_directory.dart';
 import 'package:stitch_chat/data/services/local_identity_service.dart';
+import 'package:stitch_chat/data/services/session_vault.dart';
+import 'package:stitch_chat/data/services/stitch_http_client.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 import 'package:stitch_chat/ui/auth/login_viewmodel.dart';
+import 'package:stitch_chat/ui/columns/column_view.dart';
 import 'package:stitch_chat/ui/columns/columns_view.dart';
 import 'package:stitch_chat/ui/columns/columns_viewmodel.dart';
 import 'package:stitch_chat/ui/core/theme/app_theme.dart';
-import '../../domain/branch_path_service_test.dart' show FakeMessageRepository;
+
 import '../message_font_test_helper.dart';
-import '../pump_helpers.dart';
+
+import '../../domain/branch_path_service_test.dart' show FakeMessageRepository;
 
 class FakeIdentityService implements LocalIdentityService {
   @override
@@ -52,9 +54,16 @@ class InMemoryColumnRepository implements ColumnRepository {
   int _n = 0;
 
   @override
-  Future<ColumnMeta> createColumn({String? anchorMessageId, double? width}) async {
+  Future<ColumnMeta> createColumn({
+    String? anchorMessageId,
+    double? width,
+  }) async {
     final id = 'longcolid-${_n++}';
-    final meta = ColumnMeta(id: id, anchorMessageId: anchorMessageId, width: width);
+    final meta = ColumnMeta(
+      id: id,
+      anchorMessageId: anchorMessageId,
+      width: width,
+    );
     _columns[id] = meta;
     return meta;
   }
@@ -72,13 +81,21 @@ class InMemoryColumnRepository implements ColumnRepository {
   @override
   Future<void> updateColumnWidth(String id, double? width) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: existing.anchorMessageId, width: width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: existing.anchorMessageId,
+      width: width,
+    );
   }
 
   @override
   Future<void> updateColumnAnchor(String id, String anchorMessageId) async {
     final existing = _columns[id]!;
-    _columns[id] = ColumnMeta(id: existing.id, anchorMessageId: anchorMessageId, width: existing.width);
+    _columns[id] = ColumnMeta(
+      id: existing.id,
+      anchorMessageId: anchorMessageId,
+      width: existing.width,
+    );
   }
 
   @override
@@ -106,7 +123,11 @@ class InMemoryColumnRepository implements ColumnRepository {
   }
 
   @override
-  Future<void> setBranchPointer(String columnId, String parentId, String childId) async {
+  Future<void> setBranchPointer(
+    String columnId,
+    String parentId,
+    String childId,
+  ) async {
     (_visibleOutgoing[columnId] ??= {})[parentId] = childId;
     (_visibleIncoming[columnId] ??= {})[childId] = parentId;
   }
@@ -120,43 +141,66 @@ class InMemoryColumnRepository implements ColumnRepository {
       _visibleIncoming[columnId]?[messageId];
 
   @override
-  Future<void> setVisibleIncoming(String columnId, String childId, String newParentId) async {
+  Future<void> setVisibleIncoming(
+    String columnId,
+    String childId,
+    String newParentId,
+  ) async {
+    // Same row as [setBranchPointer]: one pointer is both "parent's visible
+    // child" and "child's visible parent", matching the drift table.
+    final oldParentId = _visibleIncoming[columnId]?[childId];
+    if (oldParentId != null && oldParentId != newParentId) {
+      final outgoing = _visibleOutgoing[columnId];
+      if (outgoing?[oldParentId] == childId) outgoing!.remove(oldParentId);
+    }
+    (_visibleOutgoing[columnId] ??= {})[newParentId] = childId;
     (_visibleIncoming[columnId] ??= {})[childId] = newParentId;
   }
 }
 
 void main() {
   late LoginViewModel loginVm;
-
   late MessageFontService messageFontService;
 
   setUp(() async {
     ColumnView.debugSuppressComposerAutoFocus = true;
+    messageFontService = await createTestMessageFontService();
     loginVm = LoginViewModel(
       authRepository: FakeAuthRepository(),
       notifications: NotificationService(),
     );
-    messageFontService = await createTestMessageFontService();
   });
 
   tearDown(() => loginVm.dispose());
 
-  List<SingleChildWidget> _providers(ColumnsViewModel vm) => [
-        ChangeNotifierProvider<ColumnsViewModel>.value(value: vm),
-        ChangeNotifierProvider<LoginViewModel>.value(value: loginVm),
-        ChangeNotifierProvider<MessageFontService>.value(value: messageFontService),
-        Provider<CloudUserDirectory>.value(
-          value: CloudUserDirectory(
-            StitchHttpClient(baseUrl: 'http://127.0.0.1:1', vault: InMemorySessionVault()),
-          ),
+  List<SingleChildWidget> providersFor(ColumnsViewModel vm) => [
+    ChangeNotifierProvider<ColumnsViewModel>.value(value: vm),
+    ChangeNotifierProvider<LoginViewModel>.value(value: loginVm),
+    ChangeNotifierProvider<MessageFontService>.value(value: messageFontService),
+    Provider<CloudUserDirectory>.value(
+      value: CloudUserDirectory(
+        StitchHttpClient(
+          baseUrl: 'http://127.0.0.1:1',
+          vault: InMemorySessionVault(),
         ),
-      ];
+      ),
+    ),
+  ];
 
-  testWidgets('scroll position is preserved when switching columns', (tester) async {
+  testWidgets('scroll position is preserved when switching columns', (
+    tester,
+  ) async {
     final messages = FakeMessageRepository();
     final columns = InMemoryColumnRepository();
-    final branchPathService = BranchPathService(messages, columns);
-    final vm = ColumnsViewModel(messages, columns, branchPathService, FakeIdentityService());
+    final store = MessageStore(messages);
+    final branchPathService = BranchPathService(messages, columns, store);
+    final vm = ColumnsViewModel(
+      messages,
+      columns,
+      branchPathService,
+      store,
+      FakeIdentityService(),
+    );
 
     // Seed column A with many messages so it's scrollable.
     String? prevA;
@@ -180,11 +224,11 @@ void main() {
 
     await tester.pumpWidget(
       MultiProvider(
-        providers: _providers(vm),
+        providers: providersFor(vm),
         child: MaterialApp(theme: AppTheme.light(), home: const ColumnsView()),
       ),
     );
-    await pumpUiSettle(tester);
+    await tester.pumpAndSettle();
 
     final scrollableFinder = find.descendant(
       of: find.byKey(ValueKey(colA.id)),
@@ -192,21 +236,31 @@ void main() {
     );
 
     await tester.drag(scrollableFinder.first, const Offset(0, 300));
-    await pumpUiSettle(tester);
+    await tester.pumpAndSettle();
 
     // Column A's `CustomScrollView` is centered on its persisted anchor
     // (the last/bottom message), so dragging toward older content — which
     // lives in the before-anchor sliver — moves `pixels` negative, not
     // positive as it would in the old `reverse: true` ListView.
-    final offsetAfterScroll = tester.state<ScrollableState>(scrollableFinder.first).position.pixels;
+    final offsetAfterScroll = tester
+        .state<ScrollableState>(scrollableFinder.first)
+        .position
+        .pixels;
     expect(offsetAfterScroll, lessThan(0));
 
     await tester.tap(find.byKey(ValueKey(colB.id)).first);
-    await pumpUiSettle(tester);
+    await tester.pumpAndSettle();
 
-    final offsetAfterSwitch = tester.state<ScrollableState>(scrollableFinder.first).position.pixels;
-    expect(offsetAfterSwitch, offsetAfterScroll,
-        reason: 'Switching the active column must not move column A\'s scroll position');
+    final offsetAfterSwitch = tester
+        .state<ScrollableState>(scrollableFinder.first)
+        .position
+        .pixels;
+    expect(
+      offsetAfterSwitch,
+      offsetAfterScroll,
+      reason:
+          'Switching the active column must not move column A\'s scroll position',
+    );
   });
 
   testWidgets(
@@ -214,11 +268,13 @@ void main() {
     (tester) async {
       final messages = FakeMessageRepository();
       final columns = InMemoryColumnRepository();
-      final branchPathService = BranchPathService(messages, columns);
+      final store = MessageStore(messages);
+      final branchPathService = BranchPathService(messages, columns, store);
       final vm = ColumnsViewModel(
         messages,
         columns,
         branchPathService,
+        store,
         FakeIdentityService(),
       );
 
@@ -244,11 +300,14 @@ void main() {
 
       await tester.pumpWidget(
         MultiProvider(
-          providers: _providers(vm),
-          child: MaterialApp(theme: AppTheme.light(), home: const ColumnsView()),
+          providers: providersFor(vm),
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const ColumnsView(),
+          ),
         ),
       );
-      await pumpUiSettle(tester);
+      await tester.pumpAndSettle();
 
       final scrollableRight = find.descendant(
         of: find.byKey(ValueKey(colRight.id)),
@@ -256,18 +315,22 @@ void main() {
       );
 
       await tester.drag(scrollableRight.first, const Offset(0, 300));
-      await pumpUiSettle(tester);
+      await tester.pumpAndSettle();
 
-      final offsetAfterScroll =
-          tester.state<ScrollableState>(scrollableRight.first).position.pixels;
+      final offsetAfterScroll = tester
+          .state<ScrollableState>(scrollableRight.first)
+          .position
+          .pixels;
       expect(offsetAfterScroll, lessThan(0));
 
       await vm.removeColumn(colLeft.id);
-      await pumpUiSettle(tester);
+      await tester.pumpAndSettle();
 
       expect(vm.columns.single.id, colRight.id);
-      final offsetAfterRemove =
-          tester.state<ScrollableState>(scrollableRight.first).position.pixels;
+      final offsetAfterRemove = tester
+          .state<ScrollableState>(scrollableRight.first)
+          .position
+          .pixels;
       expect(
         offsetAfterRemove,
         offsetAfterScroll,
@@ -283,19 +346,17 @@ void main() {
     (tester) async {
       final messages = FakeMessageRepository();
       final columns = InMemoryColumnRepository();
-      final branchPathService = BranchPathService(messages, columns);
+      final store = MessageStore(messages);
+      final branchPathService = BranchPathService(messages, columns, store);
       final vm = ColumnsViewModel(
         messages,
         columns,
         branchPathService,
+        store,
         FakeIdentityService(),
       );
 
-      Future<Message> save(
-        String id,
-        String content, {
-        DateTime? at,
-      }) async {
+      Future<Message> save(String id, String content, {DateTime? at}) async {
         final m = Message(
           id: id,
           role: MessageRole.user,
@@ -310,7 +371,14 @@ void main() {
       await save('fork0001', 'fork parent', at: DateTime(2024, 1, 1));
       await save('child-a1', 'branch A child', at: DateTime(2024, 1, 2));
       await save('leaf-a01', 'branch A leaf', at: DateTime(2024, 1, 3));
-      await save('child-b1', 'branch B child', at: DateTime(2024, 1, 4));
+      // Tall enough that, once this sibling becomes the center's successor,
+      // maxScrollExtent can hold the pin correction. A short card fits in
+      // the viewport and the correction clamps away.
+      await save(
+        'child-b1',
+        List.filled(30, 'branch B child line').join('\n'),
+        at: DateTime(2024, 1, 4),
+      );
       await save('leaf-b01', 'branch B leaf', at: DateTime(2024, 1, 5));
 
       await messages.addReplyEdge('fork0001', 'child-a1');
@@ -326,14 +394,14 @@ void main() {
 
       await tester.pumpWidget(
         MultiProvider(
-          providers: _providers(vm),
+          providers: providersFor(vm),
           child: MaterialApp(
             theme: AppTheme.light(),
             home: const ColumnsView(),
           ),
         ),
       );
-      await pumpUiSettle(tester);
+      await tester.pumpAndSettle();
 
       expect(vm.anchorOf(vm.columns.single.id), 'child-a1');
       expect(
@@ -342,9 +410,9 @@ void main() {
       );
 
       double topY(String id) {
-        final box = tester.renderObject(
-          find.byKey(ValueKey(id), skipOffstage: false),
-        ) as RenderBox;
+        final box =
+            tester.renderObject(find.byKey(ValueKey(id), skipOffstage: false))
+                as RenderBox;
         return box.localToGlobal(Offset.zero).dy;
       }
 
@@ -355,11 +423,8 @@ void main() {
 
       // Pull older content into view so the fork parent is on-screen and the
       // scroll range has room to apply the center-relocation correction.
-      await tester.drag(
-        find.byType(Scrollable).first,
-        const Offset(0, 240),
-      );
-      await pumpUiSettle(tester);
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, 240));
+      await tester.pumpAndSettle();
 
       final parentYBefore = topY('fork0001');
       // Sanity: parent and current center are not already the same slot.
@@ -376,7 +441,7 @@ void main() {
           matching: find.byTooltip('Next'),
         ),
       );
-      await pumpUiSettle(tester);
+      await tester.pumpAndSettle();
 
       expect(vm.anchorOf(vm.columns.single.id), 'fork0001');
       expect(
@@ -387,18 +452,18 @@ void main() {
             'same viewport Y after center relocation',
       );
     },
-    // Viewport pin after sibling switch is layout-sensitive; covered by manual QA.
-    skip: true,
   );
 
   testWidgets('first message in a column starts at thread top', (tester) async {
     final messages = FakeMessageRepository();
     final columns = InMemoryColumnRepository();
-    final branchPathService = BranchPathService(messages, columns);
+    final store = MessageStore(messages);
+    final branchPathService = BranchPathService(messages, columns, store);
     final vm = ColumnsViewModel(
       messages,
       columns,
       branchPathService,
+      store,
       FakeIdentityService(),
     );
     final col = await columns.createColumn(anchorMessageId: null);
@@ -406,18 +471,20 @@ void main() {
 
     await tester.pumpWidget(
       MultiProvider(
-        providers: _providers(vm),
+        providers: providersFor(vm),
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: const Scaffold(body: SizedBox(height: 800, child: ColumnsView())),
+          home: const Scaffold(
+            body: SizedBox(height: 800, child: ColumnsView()),
+          ),
         ),
       ),
     );
-    await pumpUiSettle(tester);
+    await tester.pumpAndSettle();
 
     await tester.enterText(find.byType(TextField), 'hello');
     await tester.tap(find.byIcon(Icons.arrow_upward));
-    await pumpUiSettle(tester);
+    await tester.pumpAndSettle();
 
     final scrollable = find.descendant(
       of: find.byKey(ValueKey(col.id)),
@@ -426,10 +493,7 @@ void main() {
     final position = tester
         .state<ScrollableState>(
           find
-              .descendant(
-                of: scrollable,
-                matching: find.byType(Scrollable),
-              )
+              .descendant(of: scrollable, matching: find.byType(Scrollable))
               .first,
         )
         .position;

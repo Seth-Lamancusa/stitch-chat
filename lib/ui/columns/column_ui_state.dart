@@ -96,6 +96,10 @@ class ColumnUiState {
   /// Aggregate cloud sync health for the reply-connected subgraph.
   ColumnCloudSyncState columnCloudSync = ColumnCloudSyncState.idle;
 
+  /// Bots this column is about to message (or already tried to) that still
+  /// need sign-in. Shared auth state, filtered to this column's recipients.
+  List<BotAuthPrompt> authPrompts = const [];
+
   ColumnUiState({
     required this.id,
     this.width,
@@ -118,15 +122,17 @@ class ColumnUiState {
 }
 
 /// Composer banner for bots that require a column cwd.
-enum CwdWarningPhase {
-  none,
-  advisory,
-  sent,
-}
+enum CwdWarningPhase { none, advisory, sent }
 
 /// Aggregate sync health for the reply-connected subgraph (when cloud sync on).
-enum ColumnCloudSyncState {
-  idle,
-  pending,
-  failed,
+enum ColumnCloudSyncState { idle, pending, failed }
+
+/// Sign-in prompt for one bot, copied onto the column so the composer
+/// can render it without reading the bridge.
+class BotAuthPrompt {
+  const BotAuthPrompt({required this.botId, required this.state, this.detail});
+
+  final String botId;
+  final String state;
+  final String? detail;
 }

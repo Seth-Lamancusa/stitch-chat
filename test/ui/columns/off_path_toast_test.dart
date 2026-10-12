@@ -6,7 +6,9 @@ import 'package:stitch_chat/data/models/message.dart';
 import 'package:stitch_chat/data/repositories/auth_repository.dart';
 import 'package:stitch_chat/data/services/local_identity_service.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 import 'package:stitch_chat/ui/columns/columns_viewmodel.dart';
+import 'package:stitch_chat/ui/core/adaptive_marker.dart';
 
 import '../../domain/branch_path_service_test.dart'
     show FakeColumnRepository, FakeMessageRepository;
@@ -57,10 +59,12 @@ void main() {
     messages = FakeMessageRepository();
     columns = FakeColumnRepository();
     notifications = NotificationService();
+    final store = MessageStore(messages);
     vm = ColumnsViewModel(
       messages,
       columns,
-      BranchPathService(messages, columns),
+      BranchPathService(messages, columns, store),
+      store,
       _Identity(),
       notifications: notifications,
     );
@@ -150,6 +154,12 @@ void main() {
     );
 
     expect(notifications.toasts, isEmpty);
+    expect(
+      vm.columns.single.rows.map((r) => r.message.id).toList(),
+      ['root', 'bot-reply'],
+    );
+    expect(await columns.getVisibleOutgoing(columnId, 'root'), 'bot-reply');
+    expect(vm.columns.single.bottomMarker, MarkerVisualState.end);
   });
 
   test('matching visible outgoing does not toast', () async {
@@ -193,6 +203,7 @@ void main() {
 
     expect(notifications.toasts, hasLength(1));
     expect(notifications.toasts.single.title, 'New message from bob');
+    expect(await columns.getVisibleOutgoing(columnId, 'a'), isNull);
   });
 
   test('reply under a parent outside the column reply tree does not toast', () async {
@@ -237,5 +248,106 @@ void main() {
       vm.columns.single.rows.map((r) => r.message.id).toList(),
       ['root', 'bot-reply'],
     );
+  });
+
+  test('hidden side fork stays off the tip until a normal reply arrives', () async {
+    await vm.ingestIncomingMessage(
+      columnId: columnId,
+      parentId: 'root',
+      hidden: true,
+      message: _msg(
+        'side',
+        role: MessageRole.thinking,
+        authorId: 'cursor',
+        content: 'thinking',
+        createdAt: DateTime.utc(2026, 1, 2),
+      ),
+    );
+
+    expect(vm.columns.single.rows.map((r) => r.message.id).toList(), ['root']);
+    expect(await columns.getVisibleOutgoing(columnId, 'root'), isNull);
+    expect(vm.columns.single.bottomHiddenCount, 1);
+    expect(vm.columns.single.bottomMarker, MarkerVisualState.end);
+    expect(notifications.toasts, isEmpty);
+
+    await vm.ingestIncomingMessage(
+      columnId: columnId,
+      parentId: 'root',
+      message: _msg(
+        'reply',
+        role: MessageRole.localBot,
+        authorId: 'cursor',
+        content: 'the answer',
+        createdAt: DateTime.utc(2026, 1, 3),
+      ),
+    );
+
+    expect(
+      vm.columns.single.rows.map((r) => r.message.id).toList(),
+      ['root', 'reply'],
+    );
+    expect(await columns.getVisibleOutgoing(columnId, 'root'), 'reply');
+    expect(vm.columns.single.bottomHiddenCount, 0);
+    expect(vm.columns.single.bottomMarker, MarkerVisualState.end);
+    expect(notifications.toasts, isEmpty);
+  });
+
+  test('a later reply part under the new tip materializes too', () async {
+    await vm.ingestIncomingMessage(
+      columnId: columnId,
+      parentId: 'root',
+      message: _msg(
+        'a1',
+        role: MessageRole.localBot,
+        authorId: 'cursor',
+        content: 'first',
+        createdAt: DateTime.utc(2026, 1, 2),
+      ),
+    );
+    await vm.ingestIncomingMessage(
+      columnId: columnId,
+      parentId: 'a1',
+      message: _msg(
+        'a2',
+        role: MessageRole.localBot,
+        authorId: 'cursor',
+        content: 'second',
+        createdAt: DateTime.utc(2026, 1, 3),
+      ),
+    );
+
+    expect(
+      vm.columns.single.rows.map((r) => r.message.id).toList(),
+      ['root', 'a1', 'a2'],
+    );
+    expect(await columns.getVisibleOutgoing(columnId, 'root'), 'a1');
+    expect(await columns.getVisibleOutgoing(columnId, 'a1'), 'a2');
+    expect(notifications.toasts, isEmpty);
+  });
+
+  test('an already-chosen sibling pointer is not replaced', () async {
+    await messages.saveMessage(_msg('older', content: 'older'));
+    await messages.addReplyEdge('root', 'older');
+    await columns.setBranchPointer(columnId, 'root', 'older');
+    await vm.reloadAll();
+
+    await vm.ingestIncomingMessage(
+      columnId: columnId,
+      parentId: 'root',
+      message: _msg(
+        'bot-reply',
+        role: MessageRole.localBot,
+        authorId: 'cursor',
+        content: 'other fork',
+        createdAt: DateTime.utc(2026, 1, 2),
+      ),
+    );
+
+    expect(await columns.getVisibleOutgoing(columnId, 'root'), 'older');
+    expect(
+      vm.columns.single.rows.map((r) => r.message.id).toList(),
+      ['root', 'older'],
+    );
+    expect(notifications.toasts, hasLength(1));
   });
 }

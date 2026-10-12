@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 
 import protocol
 from logging_setup import hop
+from typing_cue import TypingCue
 
 SendFn = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -89,150 +90,130 @@ async def stream_reply(
         )
         return
 
-    typing_target = parent_message_id
-    if typing_target:
-        await send(
-            protocol.cue_envelope(
-                author_id=bot_id,
-                target_message_id=typing_target,
-                typing=True,
-            )
+    async with TypingCue(
+        send,
+        author_id=bot_id,
+        target_message_id=parent_message_id,
+    ):
+        client_kwargs: dict[str, Any] = {}
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        else:
+            client_kwargs["api_key"] = "not-needed"
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        client = AsyncOpenAI(**client_kwargs)
+        messages = project_context(context)
+        hop(
+            "py.adapter",
+            "projected messages={} roles={}",
+            len(messages),
+            ",".join(m["role"] for m in messages) or "-",
         )
 
-    async def _clear_typing() -> None:
-        nonlocal typing_target
-        if not typing_target:
+        await send(
+            {
+                "type": protocol.MESSAGE_START,
+                "message_id": message_id,
+                "parent_message_id": parent_message_id,
+                "bot_id": bot_id,
+                "role": "localBot",
+            }
+        )
+
+        full_content = ""
+        usage: dict[str, int] | None = None
+        chunk_count = 0
+        try:
+            hop(
+                "py.adapter",
+                "→runtime completions.create model={} stream=true",
+                resolved_model,
+            )
+            # Prefer usage on the final streamed chunk when the server supports it;
+            # fall back to a plain stream for strict OpenAI-compatible servers
+            # (Ollama, some proxies) that reject stream_options.
+            try:
+                stream = await client.chat.completions.create(
+                    model=resolved_model,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+            except Exception as exc:
+                hop(
+                    "py.runtime",
+                    "stream_options rejected; retry plain stream err={}",
+                    exc,
+                )
+                stream = await client.chat.completions.create(
+                    model=resolved_model,
+                    messages=messages,
+                    stream=True,
+                )
+            hop("py.runtime", "stream open model={}", resolved_model)
+            async for event in stream:
+                if getattr(event, "usage", None) is not None:
+                    usage = {
+                        "prompt_tokens": event.usage.prompt_tokens or 0,
+                        "completion_tokens": event.usage.completion_tokens or 0,
+                        "total_tokens": event.usage.total_tokens or 0,
+                    }
+                    hop("py.runtime", "usage {}", usage)
+                if not event.choices:
+                    continue
+                delta = event.choices[0].delta
+                if delta and delta.content:
+                    chunk_count += 1
+                    full_content += delta.content
+            hop(
+                "py.runtime",
+                "stream closed chunks={} chars={}",
+                chunk_count,
+                len(full_content),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface any OpenAI/network error
+            logger.exception(
+                "completions failed bot_id={} parent={} model={}",
+                bot_id,
+                parent_message_id,
+                resolved_model,
+            )
+            hop(
+                "py.adapter",
+                "←runtime error bot_id={} parent={} err={}",
+                bot_id,
+                parent_message_id,
+                exc,
+            )
+            await send(
+                {
+                    "type": protocol.ERROR,
+                    "message_id": message_id,
+                    "parent_message_id": parent_message_id,
+                    "error": str(exc),
+                }
+            )
             return
-        await send(
-            protocol.cue_envelope(
-                author_id=bot_id,
-                target_message_id=typing_target,
-                typing=False,
-            )
-        )
-        typing_target = None
 
-    client_kwargs: dict[str, Any] = {}
-    if api_key:
-        client_kwargs["api_key"] = api_key
-    else:
-        client_kwargs["api_key"] = "not-needed"
-    if base_url:
-        client_kwargs["base_url"] = base_url
-
-    client = AsyncOpenAI(**client_kwargs)
-    messages = project_context(context)
-    hop(
-        "py.adapter",
-        "projected messages={} roles={}",
-        len(messages),
-        ",".join(m["role"] for m in messages) or "-",
-    )
-
-    await send(
-        {
-            "type": protocol.MESSAGE_START,
+        end: dict[str, Any] = {
+            "type": protocol.MESSAGE_END,
             "message_id": message_id,
             "parent_message_id": parent_message_id,
             "bot_id": bot_id,
             "role": "localBot",
+            "content": full_content,
+            "is_final": True,
         }
-    )
-
-    full_content = ""
-    usage: dict[str, int] | None = None
-    chunk_count = 0
-    try:
+        if usage is not None:
+            end["usage"] = usage
         hop(
             "py.adapter",
-            "→runtime completions.create model={} stream=true",
-            resolved_model,
-        )
-        # Prefer usage on the final streamed chunk when the server supports it;
-        # fall back to a plain stream for strict OpenAI-compatible servers
-        # (Ollama, some proxies) that reject stream_options.
-        try:
-            stream = await client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-        except Exception as exc:
-            hop(
-                "py.runtime",
-                "stream_options rejected; retry plain stream err={}",
-                exc,
-            )
-            stream = await client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,
-                stream=True,
-            )
-        hop("py.runtime", "stream open model={}", resolved_model)
-        async for event in stream:
-            if getattr(event, "usage", None) is not None:
-                usage = {
-                    "prompt_tokens": event.usage.prompt_tokens or 0,
-                    "completion_tokens": event.usage.completion_tokens or 0,
-                    "total_tokens": event.usage.total_tokens or 0,
-                }
-                hop("py.runtime", "usage {}", usage)
-            if not event.choices:
-                continue
-            delta = event.choices[0].delta
-            if delta and delta.content:
-                chunk_count += 1
-                full_content += delta.content
-        hop(
-            "py.runtime",
-            "stream closed chunks={} chars={}",
-            chunk_count,
+            "←runtime done bot_id={} parent={} chars={} usage={}",
+            bot_id,
+            parent_message_id,
             len(full_content),
+            usage,
         )
-    except Exception as exc:  # noqa: BLE001 - surface any OpenAI/network error
-        logger.exception(
-            "completions failed bot_id={} parent={} model={}",
-            bot_id,
-            parent_message_id,
-            resolved_model,
-        )
-        hop(
-            "py.adapter",
-            "←runtime error bot_id={} parent={} err={}",
-            bot_id,
-            parent_message_id,
-            exc,
-        )
-        await send(
-            {
-                "type": protocol.ERROR,
-                "message_id": message_id,
-                "parent_message_id": parent_message_id,
-                "error": str(exc),
-            }
-        )
-        await _clear_typing()
-        return
-
-    end: dict[str, Any] = {
-        "type": protocol.MESSAGE_END,
-        "message_id": message_id,
-        "parent_message_id": parent_message_id,
-        "bot_id": bot_id,
-        "role": "localBot",
-        "content": full_content,
-        "is_final": True,
-    }
-    if usage is not None:
-        end["usage"] = usage
-    hop(
-        "py.adapter",
-        "←runtime done bot_id={} parent={} chars={} usage={}",
-        bot_id,
-        parent_message_id,
-        len(full_content),
-        usage,
-    )
-    await send(end)
-    await _clear_typing()
+        await send(end)

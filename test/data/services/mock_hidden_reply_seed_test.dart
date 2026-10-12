@@ -6,6 +6,7 @@ import 'package:stitch_chat/data/services/app_database.dart';
 import 'package:stitch_chat/data/services/mock_hidden_reply.dart';
 import 'package:stitch_chat/data/services/mock_hidden_reply_seed.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 
 void main() {
   late AppDatabase db;
@@ -44,8 +45,9 @@ void main() {
     final race = cols.firstWhere(
       (c) => c.anchorMessageId == MockHiddenReply.fixtureReplyId,
     );
-    final raceBranch = await BranchPathService(messages, columns)
-        .getFullVisibleBranch(race.id, MockHiddenReply.fixtureTriggerId);
+    final store = MessageStore(messages);
+    final raceBranch = await BranchPathService(messages, columns, store)
+        .materializedTrajectory(race.id, MockHiddenReply.fixtureTriggerId);
     expect(raceBranch.map((m) => m.id).toList(), [
       MockHiddenReply.fixtureTriggerId,
       MockHiddenReply.fixtureReplyId,
@@ -54,8 +56,8 @@ void main() {
     final reveal = cols.firstWhere(
       (c) => c.anchorMessageId == MockHiddenReply.fixtureRevealTriggerId,
     );
-    final revealBranch = await BranchPathService(messages, columns)
-        .getFullVisibleBranch(
+    final revealBranch = await BranchPathService(messages, columns, store)
+        .materializedTrajectory(
       reveal.id,
       MockHiddenReply.fixtureRevealTriggerId,
     );

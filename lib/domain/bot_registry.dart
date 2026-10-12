@@ -11,6 +11,7 @@ class BotSpec {
     required this.id,
     required this.aliases,
     this.requiresCwd = false,
+    this.requiresAuth = false,
   });
 
   /// Canonical bot id sent on the wire (e.g. `chatgpt`).
@@ -22,6 +23,11 @@ class BotSpec {
   /// When true and the column has no cwd, the composer shows a warning and
   /// the bridge skips adapter dispatch. Not an error.
   final bool requiresCwd;
+
+  /// When true, the bridge skips dispatch until the bot is signed in.
+  /// The composer shows a sign-in button; that bot's handler decides what
+  /// signing in runs.
+  final bool requiresAuth;
 }
 
 class BotMention {
@@ -40,15 +46,13 @@ final _mentionPattern = RegExp(r'(?:^|\s)@([A-Za-z0-9_-]+)');
 /// ignored (no dispatch); the bridge still validates bot_id.
 class BotRegistry {
   BotRegistry(List<BotSpec> bots)
-      : _byId = {for (final bot in bots) bot.id: bot},
-        _aliasToId = {
-          for (final bot in bots)
-            for (final alias in bot.aliases) alias.toLowerCase(): bot.id,
-        };
+    : _byId = {for (final bot in bots) bot.id: bot},
+      _aliasToId = {
+        for (final bot in bots)
+          for (final alias in bot.aliases) alias.toLowerCase(): bot.id,
+      };
 
-  const BotRegistry.empty()
-      : _byId = const {},
-        _aliasToId = const {};
+  const BotRegistry.empty() : _byId = const {}, _aliasToId = const {};
 
   factory BotRegistry.fromWire(List<dynamic> bots) {
     return BotRegistry([
@@ -57,6 +61,7 @@ class BotRegistry {
           id: entry['id'] as String,
           aliases: (entry['aliases'] as List).cast<String>().toSet(),
           requiresCwd: entry['requires_cwd'] == true,
+          requiresAuth: entry['requires_auth'] == true,
         ),
     ]);
   }
@@ -66,12 +71,13 @@ class BotRegistry {
 
   /// Canonical bots advertised by the bridge, sorted by [BotSpec.id].
   List<BotSpec> get bots {
-    final list = _byId.values.toList()
-      ..sort((a, b) => a.id.compareTo(b.id));
+    final list = _byId.values.toList()..sort((a, b) => a.id.compareTo(b.id));
     return List.unmodifiable(list);
   }
 
   bool requiresCwd(String botId) => _byId[botId]?.requiresCwd ?? false;
+
+  bool requiresAuth(String botId) => _byId[botId]?.requiresAuth ?? false;
 
   bool isKnownBot(String botId) => _byId.containsKey(botId);
 
@@ -82,10 +88,11 @@ class BotRegistry {
   List<String> searchTagSuggestions(String query, {int limit = 15}) {
     if (limit <= 0) return const [];
     final prefix = query.toLowerCase();
-    final tags = _aliasToId.keys
-        .where((tag) => prefix.isEmpty || tag.startsWith(prefix))
-        .toList()
-      ..sort();
+    final tags =
+        _aliasToId.keys
+            .where((tag) => prefix.isEmpty || tag.startsWith(prefix))
+            .toList()
+          ..sort();
     if (tags.length <= limit) return tags;
     return tags.sublist(0, limit);
   }

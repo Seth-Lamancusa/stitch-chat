@@ -19,7 +19,9 @@ def test_cursor_does_not_require_cwd():
     by_id = {entry["id"]: entry for entry in protocol.bot_registry_payload()}
     assert by_id["chatgpt"]["requires_cwd"] is False
     assert by_id["cursor"]["requires_cwd"] is False
+    assert by_id["cursor"]["requires_auth"] is True
     assert protocol.bot_requires_cwd("cursor") is False
+    assert protocol.bot_requires_auth("cursor") is True
     assert protocol.BOTS_REQUIRING_CWD == frozenset()
 
 
@@ -403,6 +405,58 @@ def test_cursor_shim_typing_clears_after_final_message_end():
         if e.get("type") == protocol.CUE and e.get("typing") is False
     )
     assert final_end_idx < clear_idx
+
+
+def test_cursor_shim_typing_heartbeat_during_silence():
+    """A quiet SDK step still refreshes typing before Dart's 8s TTL."""
+    sent: list[dict] = []
+
+    async def send(envelope: dict) -> None:
+        sent.append(envelope)
+
+    async def fake_invoke(payload, on_progress):
+        await asyncio.sleep(0.08)
+        return {
+            "ok": True,
+            "status": "finished",
+            "text": "after silence",
+            "mode": "miss",
+            "assistant_message_id": "srv-hb",
+        }
+
+    with (
+        patch("cursor_adapter._invoke_runner_once", new=AsyncMock(side_effect=fake_invoke)),
+        patch("typing_cue.TYPING_HEARTBEAT_S", 0.02),
+    ):
+        asyncio.run(
+            cursor_handle(
+                parent_message_id="trig-hb",
+                bot_id="cursor",
+                context=[{"id": "trig-hb", "role": "user", "content": "@cursor x"}],
+                send=send,
+                cwd="/tmp/proj",
+            )
+        )
+
+    cues = [e for e in sent if e["type"] == protocol.CUE]
+    assert all(c["target_message_id"] == "trig-hb" for c in cues)
+    assert cues[0]["typing"] is True
+    assert cues[-1]["typing"] is False
+    # Initial cue plus at least one clock refresh while the runner was silent.
+    assert sum(1 for c in cues if c["typing"] is True) >= 2
+    clear_idx = next(
+        i for i, e in enumerate(sent) if e.get("type") == protocol.CUE and e.get("typing") is False
+    )
+    final_end_idx = next(
+        i
+        for i, e in enumerate(sent)
+        if e.get("type") == protocol.MESSAGE_END and e.get("is_final") is True
+    )
+    assert final_end_idx < clear_idx
+    assert not any(
+        e.get("type") == protocol.CUE and e.get("typing") is True
+        for e in sent[clear_idx + 1 :]
+    )
 
 
 def test_cursor_shim_defaults_cwd_to_home():

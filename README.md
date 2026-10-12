@@ -116,7 +116,7 @@ Dart and the Python bridge share one log level and write sibling rotating files 
 
 Levels: `TRACE` \| `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. Flutter loads `.env` at startup and passes both knobs into the Python subprocess, so one setting covers both processes.
 
-Bot keys in the same `.env`: `OPENAI_API_KEY` (Completions / `@chatgpt`), `CURSOR_API_KEY` (local Cursor SDK / `@cursor`). Cursor’s SDK runs in `python-server/runtimes/cursor/venv` — not the bridge venv.
+Bot keys in the same `.env`: `OPENAI_API_KEY` (Completions / `@chatgpt`). `CURSOR_API_KEY` is an optional override for the bundled Cursor CLI (`@cursor`); when it is unset, the column sign-in button asks Cursor's auth handler to run `agent login`, which opens the system default browser and stores its own credentials. The CLI package is fetched by `tool/fetch_cursor_agent.sh` into `third_party/cursor-agent/` and copied into the AppImage next to the Python bridge.
 
 | File | Writer | Rotation |
 | --- | --- | --- |

@@ -31,6 +31,7 @@ import 'data/services/session_vault.dart';
 import 'data/services/stitch_http_client.dart';
 import 'data/services/stitch_ws_client.dart';
 import 'domain/branch_path_service.dart';
+import 'domain/message_store.dart';
 import 'ui/auth/login_viewmodel.dart';
 import 'ui/columns/columns_view.dart';
 import 'ui/columns/columns_viewmodel.dart';
@@ -46,7 +47,11 @@ void main() async {
   await windowManager.setTitle('Stitch');
 
   final stitchEnv = StitchEnv.load();
-  await StitchLog.initialize(logDir: stitchEnv.logDir, level: stitchEnv.logLevel);
+  await stitchEnv.resolveLogDir();
+  await StitchLog.initialize(
+    logDir: stitchEnv.logDir,
+    level: stitchEnv.logLevel,
+  );
 
   void handleTerminationSignal(_) {
     _backendWs?.dispose();
@@ -96,7 +101,12 @@ void main() async {
     _botBridge = botBridge;
     StitchLog.info('bot bridge connected', tag: 'main');
   } catch (e, st) {
-    StitchLog.error('bot bridge connect failed', tag: 'main', error: e, stackTrace: st);
+    StitchLog.error(
+      'bot bridge connect failed',
+      tag: 'main',
+      error: e,
+      stackTrace: st,
+    );
     notificationService.showError(
       'Could not connect to local bot bridge: $e',
       blocking: true,
@@ -106,7 +116,12 @@ void main() async {
   final db = AppDatabase();
   final messageRepository = DriftMessageRepository(db);
   final columnRepository = DriftColumnRepository(db);
-  final branchPathService = BranchPathService(messageRepository, columnRepository);
+  final messageStore = MessageStore(messageRepository);
+  final branchPathService = BranchPathService(
+    messageRepository,
+    columnRepository,
+    messageStore,
+  );
 
   if (stitchEnv.mockTypingCues) {
     await seedMockTypingFixtures(
@@ -142,6 +157,7 @@ void main() async {
     messageRepository,
     columnRepository,
     branchPathService,
+    messageStore,
     identityService,
     botBridge: _botBridge,
     notifications: notificationService,
@@ -182,15 +198,17 @@ void main() async {
   // author stamps before the first frame.
   await loginViewModel.init();
 
-  runApp(StitchApp(
-    columnsViewModel: columnsViewModel,
-    notificationService: notificationService,
-    themeService: themeService,
-    messageFontService: messageFontService,
-    authRepository: authRepository,
-    loginViewModel: loginViewModel,
-    stitchHttpClient: stitchHttp,
-  ));
+  runApp(
+    StitchApp(
+      columnsViewModel: columnsViewModel,
+      notificationService: notificationService,
+      themeService: themeService,
+      messageFontService: messageFontService,
+      authRepository: authRepository,
+      loginViewModel: loginViewModel,
+      stitchHttpClient: stitchHttp,
+    ),
+  );
 }
 
 class StitchApp extends StatefulWidget {
@@ -262,17 +280,29 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<NotificationService>.value(value: widget.notificationService),
-        ChangeNotifierProvider<ColumnsViewModel>.value(value: widget.columnsViewModel),
+        ChangeNotifierProvider<NotificationService>.value(
+          value: widget.notificationService,
+        ),
+        ChangeNotifierProvider<ColumnsViewModel>.value(
+          value: widget.columnsViewModel,
+        ),
         ChangeNotifierProvider<ThemeService>.value(value: widget.themeService),
         ChangeNotifierProvider<MessageFontService>.value(
           value: widget.messageFontService,
         ),
-        ChangeNotifierProvider<AuthRepository>.value(value: widget.authRepository),
-        ChangeNotifierProvider<LoginViewModel>.value(value: widget.loginViewModel),
+        ChangeNotifierProvider<AuthRepository>.value(
+          value: widget.authRepository,
+        ),
+        ChangeNotifierProvider<LoginViewModel>.value(
+          value: widget.loginViewModel,
+        ),
         Provider<StitchHttpClient>.value(value: widget.stitchHttpClient),
-        Provider<CloudUserDirectory>.value(value: CloudUserDirectory(widget.stitchHttpClient)),
-        Provider<CloudMessageApi>.value(value: CloudMessageApi(widget.stitchHttpClient)),
+        Provider<CloudUserDirectory>.value(
+          value: CloudUserDirectory(widget.stitchHttpClient),
+        ),
+        Provider<CloudMessageApi>.value(
+          value: CloudMessageApi(widget.stitchHttpClient),
+        ),
       ],
       child: Consumer2<ThemeService, AuthRepository>(
         builder: (context, themeService, auth, _) {
@@ -282,7 +312,9 @@ class _StitchAppState extends State<StitchApp> with WidgetsBindingObserver {
             title: 'Stitch',
             theme: AppTheme.light(),
             darkTheme: AppTheme.dark(),
-            themeMode: themeService.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+            themeMode: themeService.isDarkMode
+                ? ThemeMode.dark
+                : ThemeMode.light,
             home: const NotificationOverlay(child: ColumnsView()),
           );
         },

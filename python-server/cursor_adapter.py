@@ -1,105 +1,38 @@
-"""Cursor adapter shim: Stitch bridge → runtimes/cursor/agent_runner.py.
+"""Cursor adapter shim: Stitch bridge → bundled Cursor CLI.
 
-Same `handle(...)` shape as Completions. Spawns one `agent_runner --once`
-subprocess per invoke (parallel-safe; bridge process never imports
-`cursor-sdk`).
+Same `handle(...)` shape as Completions. Spawns `cursor-agent` per invoke
+(parallel-safe across workspaces via a per-cwd lock; one workspace is
+serialized). The bridge process never imports `cursor-sdk`.
 
-Maps streamed runner progress into two reply chains under the trigger:
+Maps streamed progress into two reply chains under the trigger:
   - side fork: thinking / functionCall / functionResult
   - reply branch: localBot assistant text (last message_end buffered until
-    the terminal runner line, then flushed with is_final + usage)
-
-Each subprocess owns its own SDK session; in-process affinity is not shared
-across concurrent invokes.
+    the terminal result, then flushed with is_final + usage)
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import cursor_cli
 import protocol
 from logging_setup import hop
+from typing_cue import TypingCue
 
 SendFn = Callable[[dict[str, Any]], Awaitable[None]]
 
-_RUNTIME_DIR = Path(__file__).resolve().parent / "runtimes" / "cursor"
-_RUNNER = _RUNTIME_DIR / "agent_runner.py"
-# absolute() — do not resolve() the venv python symlink (breaks site-packages).
-_PYTHON = _RUNTIME_DIR / "venv" / "bin" / "python"
-
 _SIDE_KINDS = frozenset({"thinking", "functionCall", "functionResult"})
-
-
-def _ensure_runner_binaries() -> None:
-    if not _PYTHON.is_file():
-        raise FileNotFoundError(
-            f"Cursor runtime python missing: {_PYTHON} "
-            "(create runtimes/cursor/venv and install requirements)"
-        )
-    if not _RUNNER.is_file():
-        raise FileNotFoundError(f"Cursor agent_runner missing: {_RUNNER}")
 
 
 async def _invoke_runner_once(
     payload: dict[str, Any],
     on_progress: Callable[[Mapping[str, Any]], Awaitable[None]],
 ) -> dict[str, Any]:
-    """Run one invoke in a fresh agent_runner subprocess (`--once`)."""
-    _ensure_runner_binaries()
-    hop("py.cursor", "spawn runner --once bin={} script={}", _PYTHON, _RUNNER)
-    proc = await asyncio.create_subprocess_exec(
-        str(_PYTHON.absolute()),
-        str(_RUNNER.absolute()),
-        "--once",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
-        cwd=str(Path.home()),
-        limit=8 * 1024 * 1024,
-    )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-
-    body = json.dumps(payload, ensure_ascii=False)
-    proc.stdin.write(body.encode("utf-8"))
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    try:
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                stderr = b""
-                if proc.stderr is not None:
-                    try:
-                        stderr = await asyncio.wait_for(
-                            proc.stderr.read(8000), timeout=0.5
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-                raise RuntimeError(
-                    "cursor runner exited without terminal response "
-                    f"rc={proc.returncode} "
-                    f"stderr={stderr.decode('utf-8', 'replace')}"
-                )
-            record = json.loads(raw.decode("utf-8"))
-            if record.get("event") == "progress":
-                part = record.get("part") or {}
-                if isinstance(part, dict):
-                    await on_progress(part)
-                continue
-            return record
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+    """Run one invoke against the bundled Cursor CLI."""
+    return await cursor_cli.invoke(payload, on_progress)
 
 
 def _role_for_kind(kind: str) -> str:
@@ -139,36 +72,32 @@ async def handle(
     reply_parent = parent_message_id
     buffered_reply_end: dict[str, Any] | None = None
     saw_reply_part = False
-    typing_target: str | None = None
+    typing = TypingCue(
+        send,
+        author_id=bot_id,
+        target_message_id=parent_message_id,
+    )
 
-    async def _set_typing(on: bool) -> None:
-        """Turn typing on/off for this invoke's [typing_target] only."""
-        if typing_target is None:
-            return
+    async def _reject_unauthenticated() -> None:
+        """Login lapsed mid-run. Skip (not an error toast) so Dart can replay."""
+        cursor_cli.invalidate_auth_cache()
         await send(
-            protocol.cue_envelope(
-                author_id=bot_id,
-                target_message_id=typing_target,
-                typing=on,
+            protocol.auth_state_envelope(
+                bot_id=bot_id,
+                state="unauthenticated",
+                detail="Not authenticated",
             )
         )
-
-    async def _refresh_typing() -> None:
-        """Re-emit typing=True so Dart TTL stays fresh for long gaps."""
-        if typing_target is not None:
-            await _set_typing(True)
-
-    async def _begin_typing(target: str) -> None:
-        nonlocal typing_target
-        typing_target = target
-        await _set_typing(True)
-
-    async def _end_typing() -> None:
-        nonlocal typing_target
-        if typing_target is None:
-            return
-        await _set_typing(False)
-        typing_target = None
+        await send(
+            {
+                "type": protocol.INVOKE_SKIPPED,
+                "message_id": None,
+                "parent_message_id": parent_message_id,
+                "invoke_root_id": invoke_root_id,
+                "bot_id": bot_id,
+                "reason": "requires_auth",
+            }
+        )
 
     async def _send_start(
         *,
@@ -229,7 +158,7 @@ async def handle(
 
     async def on_progress(part: Mapping[str, Any]) -> None:
         nonlocal side_parent, reply_parent, buffered_reply_end, saw_reply_part
-        await _refresh_typing()
+        await typing.refresh()
         kind = str(part.get("kind") or "")
         message_id = str(part.get("message_id") or f"srv-{uuid.uuid4()}")
         content = str(part.get("content") or "")
@@ -283,115 +212,115 @@ async def handle(
         reply_parent = message_id
         saw_reply_part = True
 
-    if parent_message_id:
-        await _begin_typing(parent_message_id)
+    async with typing:
+        try:
+            result = await _invoke_runner_once(
+                {
+                    "cwd": resolved_cwd,
+                    "context": list(context),
+                    "model": model,
+                    "assistant_message_id": fallback_message_id,
+                },
+                on_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            hop(
+                "py.adapter",
+                "cursor runner error parent={} err={}",
+                parent_message_id,
+                exc,
+            )
+            if cursor_cli.looks_like_auth_failure(str(exc)):
+                await _reject_unauthenticated()
+                return
+            await send(
+                {
+                    "type": protocol.ERROR,
+                    "message_id": fallback_message_id,
+                    "parent_message_id": parent_message_id,
+                    "invoke_root_id": invoke_root_id,
+                    "error": f"cursor runner failed: {exc}",
+                }
+            )
+            return
 
-    try:
-        result = await _invoke_runner_once(
-            {
-                "cwd": resolved_cwd,
-                "context": list(context),
-                "model": model,
-                "assistant_message_id": fallback_message_id,
-            },
-            on_progress,
-        )
-    except Exception as exc:  # noqa: BLE001
+        if not result.get("ok"):
+            err = str(result.get("error") or "cursor run failed")
+            hop(
+                "py.adapter",
+                "cursor fail parent={} kind={} mode={} agent={} err={}",
+                parent_message_id,
+                result.get("error_kind"),
+                result.get("mode"),
+                result.get("agent_id") or "-",
+                err,
+            )
+            if result.get("error_kind") == "auth" or cursor_cli.looks_like_auth_failure(err):
+                await _reject_unauthenticated()
+                return
+            await send(
+                {
+                    "type": protocol.ERROR,
+                    "message_id": fallback_message_id,
+                    "parent_message_id": parent_message_id,
+                    "invoke_root_id": invoke_root_id,
+                    "error": err,
+                }
+            )
+            return
+
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+        text = str(result.get("text") or "")
+
         hop(
             "py.adapter",
-            "cursor runner error parent={} err={}",
+            "cursor ok parent={} mode={} agent={} run={} chars={} usage={} reply_parts={}",
             parent_message_id,
-            exc,
-        )
-        await send(
-            {
-                "type": protocol.ERROR,
-                "message_id": fallback_message_id,
-                "parent_message_id": parent_message_id,
-                "invoke_root_id": invoke_root_id,
-                "error": f"cursor runner failed: {exc}",
-            }
-        )
-        await _end_typing()
-        return
-
-    if not result.get("ok"):
-        hop(
-            "py.adapter",
-            "cursor fail parent={} kind={} mode={} agent={} err={}",
-            parent_message_id,
-            result.get("error_kind"),
             result.get("mode"),
             result.get("agent_id") or "-",
-            result.get("error"),
+            result.get("run_id") or "-",
+            len(text),
+            usage,
+            saw_reply_part,
         )
+
+        # Runner finished but final reply may still be buffered — keep typing until
+        # the terminal message_end is on the wire.
+        await typing.refresh()
+
+        if buffered_reply_end is not None:
+            await _send_end(
+                **buffered_reply_end,
+                is_final=True,
+                usage=usage,
+            )
+            return
+
+        if text:
+            message_id = str(
+                result.get("assistant_message_id") or fallback_message_id
+            )
+            await _send_start(
+                message_id=message_id,
+                parent=parent_message_id,
+                role="localBot",
+            )
+            await _send_end(
+                message_id=message_id,
+                parent=parent_message_id,
+                role="localBot",
+                content=text,
+                is_final=True,
+                usage=usage,
+            )
+            return
+
         await send(
             {
                 "type": protocol.ERROR,
                 "message_id": fallback_message_id,
                 "parent_message_id": parent_message_id,
                 "invoke_root_id": invoke_root_id,
-                "error": str(result.get("error") or "cursor run failed"),
+                "error": "cursor run finished with no assistant text",
             }
         )
-        await _end_typing()
-        return
-
-    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
-    text = str(result.get("text") or "")
-
-    hop(
-        "py.adapter",
-        "cursor ok parent={} mode={} agent={} run={} chars={} usage={} reply_parts={}",
-        parent_message_id,
-        result.get("mode"),
-        result.get("agent_id") or "-",
-        result.get("run_id") or "-",
-        len(text),
-        usage,
-        saw_reply_part,
-    )
-
-    # Runner finished but final reply may still be buffered — keep typing until
-    # the terminal message_end is on the wire.
-    await _refresh_typing()
-
-    if buffered_reply_end is not None:
-        await _send_end(
-            **buffered_reply_end,
-            is_final=True,
-            usage=usage,
-        )
-        await _end_typing()
-        return
-
-    if text:
-        message_id = str(
-            result.get("assistant_message_id") or fallback_message_id
-        )
-        await _send_start(
-            message_id=message_id,
-            parent=parent_message_id,
-            role="localBot",
-        )
-        await _send_end(
-            message_id=message_id,
-            parent=parent_message_id,
-            role="localBot",
-            content=text,
-            is_final=True,
-            usage=usage,
-        )
-        await _end_typing()
-        return
-
-    await send(
-        {
-            "type": protocol.ERROR,
-            "message_id": fallback_message_id,
-            "parent_message_id": parent_message_id,
-            "invoke_root_id": invoke_root_id,
-            "error": "cursor run finished with no assistant text",
-        }
-    )
-    await _end_typing()

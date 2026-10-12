@@ -40,6 +40,7 @@ async def handle_connection(websocket):
     peer = getattr(websocket, "remote_address", None)
     logger.info("client connected peer={}", peer)
     await send({"type": protocol.READY, "bots": protocol.bot_registry_payload()})
+    asyncio.create_task(adapters.publish_auth_states(send))
 
     async for raw in websocket:
         try:
@@ -67,6 +68,22 @@ async def handle_connection(websocket):
             if isinstance(envelope.get("context"), list)
             else "?",
         )
+
+        if envelope.get("type") == protocol.AUTH_BEGIN:
+            bot_id = _normalize_bot_id(envelope.get("bot_id"))
+            if not protocol.bot_requires_auth(bot_id):
+                await send(
+                    {
+                        "type": protocol.ERROR,
+                        "message_id": None,
+                        "parent_message_id": None,
+                        "error": f"bot does not require auth: {bot_id}",
+                    }
+                )
+                continue
+            hop("py.server", "auth_begin bot_id={}", bot_id)
+            asyncio.create_task(adapters.begin_auth(bot_id, send))
+            continue
 
         if envelope.get("type") != protocol.USER_MESSAGE:
             logger.warning("unknown envelope type={}", envelope.get("type"))
@@ -130,6 +147,35 @@ async def handle_connection(websocket):
                     "parent_message_id": parent_message_id,
                     "bot_id": bot_id,
                     "reason": "requires_cwd",
+                }
+            )
+            continue
+
+        skip_reason = await adapters.auth_skip_reason(bot_id)
+        if skip_reason:
+            snap = await adapters.auth_snapshot(bot_id)
+            hop(
+                "py.server",
+                "skip dispatch bot_id={} parent={} reason={}",
+                bot_id,
+                parent_message_id,
+                skip_reason,
+            )
+            await send(
+                protocol.auth_state_envelope(
+                    bot_id=bot_id,
+                    state=str(snap.get("state") or "unauthenticated"),
+                    url=snap.get("url"),
+                    detail=snap.get("detail"),
+                )
+            )
+            await send(
+                {
+                    "type": protocol.INVOKE_SKIPPED,
+                    "message_id": None,
+                    "parent_message_id": parent_message_id,
+                    "bot_id": bot_id,
+                    "reason": skip_reason,
                 }
             )
             continue

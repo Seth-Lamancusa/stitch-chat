@@ -6,6 +6,7 @@ import 'package:stitch_chat/data/services/app_database.dart';
 import 'package:stitch_chat/data/services/mock_stitch_sibling.dart';
 import 'package:stitch_chat/data/services/mock_stitch_sibling_seed.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 
 void main() {
   late AppDatabase db;
@@ -47,8 +48,11 @@ void main() {
       MockStitchSibling.fixtureSideRootId,
     ]);
 
-    final branch = await BranchPathService(messages, columns)
-        .getFullVisibleBranch(columnId, MockStitchSibling.fixtureTriggerId);
+    final branch = await BranchPathService(
+      messages,
+      columns,
+      MessageStore(messages),
+    ).materializedTrajectory(columnId, MockStitchSibling.fixtureTriggerId);
     expect(branch.map((m) => m.id).toList(), [
       MockStitchSibling.fixtureTriggerId,
       MockStitchSibling.fixtureReplyId,

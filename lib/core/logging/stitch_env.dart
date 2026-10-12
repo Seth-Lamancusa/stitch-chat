@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'stitch_log_level.dart';
 
@@ -45,6 +46,20 @@ class StitchEnv {
 
   String? operator [](String key) => values[key];
 
+  /// Directory containing the Python bridge server + its venv.
+  ///
+  /// In a packaged Linux build, `flutter_distributor`/CMake installs
+  /// `python-server` next to the executable under `data/`. When that's
+  /// present, prefer it (the executable's cwd is unreliable when launched
+  /// from an AppImage or a desktop shortcut). Otherwise fall back to
+  /// dev-mode's `<projectRoot>/python-server` (`flutter run` from the repo
+  /// root).
+  String get pythonServerDir {
+    final bundled = p.join(p.dirname(Platform.resolvedExecutable), 'data', 'python-server');
+    if (Directory(bundled).existsSync()) return bundled;
+    return p.join(projectRoot, 'python-server');
+  }
+
   /// Backend origin for `/v1/...` calls. Trailing slashes stripped.
   ///
   /// Defaults to [defaultApiBaseUrl] (production). Set `STITCH_API_URL` only
@@ -58,13 +73,43 @@ class StitchEnv {
   StitchLogLevel get logLevel =>
       StitchLogLevel.parse(values['STITCH_LOG_LEVEL'], fallback: StitchLogLevel.debug);
 
-  /// Directory for `dart.log` / `python.log`. Defaults to `<projectRoot>/logs`.
+  String? _resolvedLogDir;
+
+  /// Directory for `dart.log` / `python.log`.
+  ///
+  /// [resolveLogDir] must be awaited once (done in `main()` right after
+  /// `StitchEnv.load()`) before this is read.
   String get logDir {
+    final resolved = _resolvedLogDir;
+    if (resolved == null) {
+      throw StateError('StitchEnv.resolveLogDir() must be awaited before logDir is read.');
+    }
+    return resolved;
+  }
+
+  /// Resolves and caches [logDir]. Honors `STITCH_LOG_DIR` when set;
+  /// otherwise defaults to `<app support dir>/logs`. A packaged build
+  /// (AppImage, installed .deb, etc.) runs with an unpredictable — and for
+  /// an AppImage's read-only squashfs mount, unwritable — cwd, so unlike
+  /// [pythonServerDir] this can't fall back to `<projectRoot>/logs` by
+  /// default; it only does so if the platform app-support directory itself
+  /// can't be resolved (e.g. under test).
+  Future<String> resolveLogDir() async {
     final override = values['STITCH_LOG_DIR']?.trim();
     if (override != null && override.isNotEmpty) {
-      return p.isAbsolute(override) ? override : p.join(projectRoot, override);
+      final resolved = p.isAbsolute(override) ? override : p.join(projectRoot, override);
+      _resolvedLogDir = resolved;
+      return resolved;
     }
-    return p.join(projectRoot, 'logs');
+    String resolved;
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      resolved = p.join(supportDir.path, 'logs');
+    } catch (_) {
+      resolved = p.join(projectRoot, 'logs');
+    }
+    _resolvedLogDir = resolved;
+    return resolved;
   }
 
   /// When true, seed typing-indicator fixtures and treat `[[mockTyping:…]]`

@@ -13,12 +13,18 @@ void main() {
     ]);
 
     test('finds chatgpt and aliases openai', () {
-      expect(registry.parseMentions('@chatgpt hi').map((m) => m.botId), ['chatgpt']);
-      expect(registry.parseMentions('hey @openai').map((m) => m.botId), ['chatgpt']);
+      expect(registry.parseMentions('@chatgpt hi').map((m) => m.botId), [
+        'chatgpt',
+      ]);
+      expect(registry.parseMentions('hey @openai').map((m) => m.botId), [
+        'chatgpt',
+      ]);
     });
 
     test('finds cursor', () {
-      expect(registry.parseMentions('@cursor fix it').map((m) => m.botId), ['cursor']);
+      expect(registry.parseMentions('@cursor fix it').map((m) => m.botId), [
+        'cursor',
+      ]);
     });
 
     test('requiresCwd is registry-driven for composer warnings', () {
@@ -26,17 +32,29 @@ void main() {
       expect(registry.requiresCwd('chatgpt'), isFalse);
     });
 
-    test('fromWire maps requires_cwd', () {
+    test('fromWire maps requires_cwd and requires_auth', () {
       final fromWire = BotRegistry.fromWire([
-        {'id': 'cursor', 'aliases': ['cursor'], 'requires_cwd': true},
-        {'id': 'chatgpt', 'aliases': ['chatgpt']},
+        {
+          'id': 'cursor',
+          'aliases': ['cursor'],
+          'requires_cwd': true,
+          'requires_auth': true,
+        },
+        {
+          'id': 'chatgpt',
+          'aliases': ['chatgpt'],
+        },
       ]);
       expect(fromWire.requiresCwd('cursor'), isTrue);
+      expect(fromWire.requiresAuth('cursor'), isTrue);
       expect(fromWire.requiresCwd('chatgpt'), isFalse);
+      expect(fromWire.requiresAuth('chatgpt'), isFalse);
     });
 
     test('dedupes and ignores unknown tags', () {
-      final mentions = registry.parseMentions('@chatgpt @openai @claude please');
+      final mentions = registry.parseMentions(
+        '@chatgpt @openai @claude please',
+      );
       expect(mentions.map((m) => m.botId), ['chatgpt']);
     });
 
@@ -47,7 +65,11 @@ void main() {
     test('searchTagSuggestions filters by prefix', () {
       expect(registry.searchTagSuggestions('chat'), ['chatgpt']);
       expect(registry.searchTagSuggestions('c'), ['chatgpt', 'cursor']);
-      expect(registry.searchTagSuggestions(''), ['chatgpt', 'cursor', 'openai']);
+      expect(registry.searchTagSuggestions(''), [
+        'chatgpt',
+        'cursor',
+        'openai',
+      ]);
     });
 
     test('bots lists advertised specs sorted by id', () {
@@ -57,12 +79,8 @@ void main() {
   });
 
   group('contextThroughReplyTarget', () {
-    Message msg(String id) => Message(
-          id: id,
-          role: MessageRole.user,
-          authorId: 'me',
-          content: id,
-        );
+    Message msg(String id) =>
+        Message(id: id, role: MessageRole.user, authorId: 'me', content: id);
 
     test('returns empty when no reply target', () {
       expect(contextThroughReplyTarget([msg('a'), msg('b')]), isEmpty);
@@ -85,15 +103,14 @@ void main() {
   });
 
   group('contextWindowIncludingTrigger', () {
-    Message msg(String id) => Message(
-          id: id,
-          role: MessageRole.user,
-          authorId: 'me',
-          content: id,
-        );
+    Message msg(String id) =>
+        Message(id: id, role: MessageRole.user, authorId: 'me', content: id);
 
     test('appends trigger as the final node', () {
-      final window = contextWindowIncludingTrigger([msg('a'), msg('b')], msg('t'));
+      final window = contextWindowIncludingTrigger([
+        msg('a'),
+        msg('b'),
+      ], msg('t'));
       expect(window.map((m) => m.id), ['a', 'b', 't']);
     });
 
@@ -107,11 +124,7 @@ void main() {
     test('returns null for empty content', () {
       expect(
         messageToCloudContextNode(
-          const Message(
-            id: 'a',
-            role: MessageRole.user,
-            content: '   ',
-          ),
+          const Message(id: 'a', role: MessageRole.user, content: '   '),
         ),
         isNull,
       );

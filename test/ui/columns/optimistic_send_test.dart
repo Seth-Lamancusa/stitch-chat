@@ -6,6 +6,7 @@ import 'package:stitch_chat/data/models/message.dart';
 import 'package:stitch_chat/data/repositories/auth_repository.dart';
 import 'package:stitch_chat/data/services/local_identity_service.dart';
 import 'package:stitch_chat/domain/branch_path_service.dart';
+import 'package:stitch_chat/domain/message_store.dart';
 import 'package:stitch_chat/ui/columns/columns_viewmodel.dart';
 
 import '../../domain/branch_path_service_test.dart'
@@ -37,14 +38,13 @@ Message _msg(
   String? authorId = 'me',
   String content = '',
   DateTime? createdAt,
-}) =>
-    Message(
-      id: id,
-      role: role,
-      authorId: authorId,
-      content: content,
-      createdAt: createdAt ?? DateTime.utc(2026, 1, 1),
-    );
+}) => Message(
+  id: id,
+  role: role,
+  authorId: authorId,
+  content: content,
+  createdAt: createdAt ?? DateTime.utc(2026, 1, 1),
+);
 
 void main() {
   late FakeMessageRepository messages;
@@ -55,10 +55,12 @@ void main() {
   setUp(() async {
     messages = FakeMessageRepository();
     columns = FakeColumnRepository();
+    final store = MessageStore(messages);
     vm = ColumnsViewModel(
       messages,
       columns,
-      BranchPathService(messages, columns),
+      BranchPathService(messages, columns, store),
+      store,
       _Identity(),
     );
 
@@ -92,10 +94,7 @@ void main() {
     final settled = vm.columns.singleWhere((c) => c.id == columnId);
     expect(settled.rows.last.message.content, 'hello optimistic');
     expect(settled.rows.last.message.isSending, isFalse);
-    expect(
-      await messages.getMessage(settled.rows.last.message.id),
-      isNotNull,
-    );
+    expect(await messages.getMessage(settled.rows.last.message.id), isNotNull);
   });
 
   test('sendMessage fork truncates visible branch optimistically', () async {
